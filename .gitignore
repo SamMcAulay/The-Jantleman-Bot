@@ -1,0 +1,20 @@
+# --- Secrets & Config ---
+.env
+
+# --- Database ---
+# We ignore the local .db file so your local test data 
+# doesn't overwrite your production data on the server.
+*.db
+*.sqlite3
+
+# --- Python Environment & Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
