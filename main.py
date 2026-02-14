@@ -47,18 +47,20 @@ async def on_member_update(before, after):
 # --- TRADING FORUM EVENT ---
 @bot.event
 async def on_thread_create(thread):
-    # Validation
+    # 1. Validation: Must be a Forum Channel
     if not isinstance(thread.parent, discord.ForumChannel): return
 
+    # 2. Validation: Must be in our Monitored List
     async with database.get_db() as db:
-        async with db.execute("SELECT forum_channel_id FROM Settings WHERE guild_id = ?", (thread.guild.id,)) as cursor:
-            setting = await cursor.fetchone()
+        async with db.execute("SELECT 1 FROM MonitoredChannels WHERE guild_id = ? AND channel_id = ?", (thread.guild.id, thread.parent_id)) as cursor:
+            is_monitored = await cursor.fetchone()
+    
+    if not is_monitored: return
 
-    if not setting or thread.parent_id != setting[0]: return
     owner = thread.owner
     if not owner: return
 
-    # Gather Data (Reputation + Name History)
+    # 3. Gather Data (Reputation + Name History)
     async with database.get_db() as db:
         db.row_factory = aiosqlite.Row
         
@@ -72,7 +74,7 @@ async def on_thread_create(thread):
             name_changes = await cursor.fetchone()
             change_count = name_changes[0] if name_changes else 0
 
-    # Construct Background Check Embed
+    # 4. Construct Background Check Embed
     embed = discord.Embed(timestamp=datetime.now())
     embed.set_footer(text="The Jantleman • Automated Check", icon_url=bot.user.display_avatar.url)
     embed.set_thumbnail(url=owner.display_avatar.url)
@@ -96,10 +98,12 @@ async def on_thread_create(thread):
             value=f"Changed name **{change_count} times** in the last 7 days.", 
             inline=False
         )
-        # If behavior is very suspicious (3+ changes), turn embed red
         if change_count >= 3:
             embed.color = discord.Color.red()
             embed.title = "🛑 High Risk Alert"
+
+    embed.description = desc
+    await thread.send(embed=embed)
 
     embed.description = desc
     await thread.send(embed=embed)

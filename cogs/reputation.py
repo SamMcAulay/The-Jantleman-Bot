@@ -29,36 +29,51 @@ class Reputation(commands.Cog):
             async with db.execute("SELECT total_reviews FROM Users WHERE user_id = ?", (user_id,)) as cursor:
                 return await cursor.fetchone()
 
-    # --- SETUP COMMAND ---
-    @app_commands.command(name="setup", description="Configure bot settings (Admins Only)")
+    # ... (Imports and helper functions remain the same) ...
+
+    # --- 1. SETUP (ROLES ONLY) ---
+    @app_commands.command(name="setup", description="Configure bot roles (Admins Only)")
     @app_commands.checks.has_permissions(administrator=True)
-    async def setup(self, interaction: discord.Interaction, forum: discord.ForumChannel, verified_role: discord.Role, audit_role: discord.Role):
+    async def setup(self, interaction: discord.Interaction, verified_role: discord.Role, audit_role: discord.Role):
         await interaction.response.defer(ephemeral=True)
         try:
             async with database.get_db() as db:
                 await db.execute('''
-                    INSERT INTO Settings (guild_id, forum_channel_id, verified_role_id, audit_role_id) 
-                    VALUES (?, ?, ?, ?) 
+                    INSERT INTO Settings (guild_id, verified_role_id, audit_role_id) 
+                    VALUES (?, ?, ?) 
                     ON CONFLICT(guild_id) DO UPDATE SET 
-                        forum_channel_id = excluded.forum_channel_id,
                         verified_role_id = excluded.verified_role_id,
                         audit_role_id = excluded.audit_role_id
-                ''', (interaction.guild_id, forum.id, verified_role.id, audit_role.id))
+                ''', (interaction.guild_id, verified_role.id, audit_role.id))
                 await db.commit()
             
-            embed = self.create_embed(
-                title="⚙️ System Configuration Updated",
-                description=(
-                    f"**Server:** {interaction.guild.name}\n"
-                    f"**Monitoring:** {forum.mention}\n"
-                    f"**Vouch Role:** {verified_role.mention}\n"
-                    f"**Audit Role:** {audit_role.mention}"
-                ),
-                color=discord.Color.green()
-            )
+            embed = self.create_embed("⚙️ Roles Configured", f"**Verified:** {verified_role.mention}\n**Audit:** {audit_role.mention}", discord.Color.green())
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"❌ Database Error: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    # --- 2. TRACK COMMAND (ADD CHANNEL) ---
+    @app_commands.command(name="track", description="Start monitoring a forum channel")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def track(self, interaction: discord.Interaction, forum: discord.ForumChannel):
+        async with database.get_db() as db:
+            # Insert, ignoring if it already exists
+            await db.execute("INSERT OR IGNORE INTO MonitoredChannels (guild_id, channel_id) VALUES (?, ?)", (interaction.guild_id, forum.id))
+            await db.commit()
+        
+        await interaction.response.send_message(f"✅ Now monitoring: {forum.mention}", ephemeral=True)
+
+    # --- 3. UNTRACK COMMAND (REMOVE CHANNEL) ---
+    @app_commands.command(name="untrack", description="Stop monitoring a forum channel")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def untrack(self, interaction: discord.Interaction, forum: discord.ForumChannel):
+        async with database.get_db() as db:
+            await db.execute("DELETE FROM MonitoredChannels WHERE guild_id = ? AND channel_id = ?", (interaction.guild_id, forum.id))
+            await db.commit()
+        
+        await interaction.response.send_message(f"sz Stopped monitoring: {forum.mention}", ephemeral=True)
+
+    # ... (Keep vouch, rep, audit, and leaderboard commands exactly the same) ...
 
     # --- VOUCH COMMAND ---
     @app_commands.command(name="vouch", description="Rate a trade (Requires Proof + Verified Role)")
