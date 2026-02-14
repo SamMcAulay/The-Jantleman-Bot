@@ -1,6 +1,6 @@
 # --- Secrets & Config ---
 .env
-
+reputation.db
 # --- Database ---
 # We ignore the local .db file so your local test data 
 # doesn't overwrite your production data on the server.
