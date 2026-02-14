@@ -1,8 +1,17 @@
 import aiosqlite
 import logging
+import os
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "reputation.db"
+# Check if we are running on Railway (Volume mounted at /app/data)
+# If the folder exists, use it. Otherwise, use local directory.
+VOLUME_PATH = Path("/app/data")
+if VOLUME_PATH.exists():
+    DB_PATH = VOLUME_PATH / "reputation.db"
+    logging.info("Using PRODUCTION database at /app/data/reputation.db")
+else:
+    DB_PATH = Path(__file__).parent / "reputation.db"
+    logging.info("Using LOCAL database")
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
