@@ -105,9 +105,6 @@ async def on_thread_create(thread):
     embed.description = desc
     await thread.send(embed=embed)
 
-    embed.description = desc
-    await thread.send(embed=embed)
-
     # WATCHLIST NOTIFICATIONS
     # Scan the title + valid starter message
     content_to_scan = thread.name.lower()
