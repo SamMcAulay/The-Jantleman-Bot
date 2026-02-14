@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 
-# Check if we are running on Railway (Volume mounted at /app/data)
+# Check if we are running on Railway
 # If the folder exists, use it. Otherwise, use local directory.
 VOLUME_PATH = Path("/app/data")
 if VOLUME_PATH.exists():
