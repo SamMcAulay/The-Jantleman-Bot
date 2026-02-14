@@ -2,7 +2,6 @@ import aiosqlite
 import logging
 from pathlib import Path
 
-# Use pathlib for robust cross-platform paths
 DB_PATH = Path(__file__).parent / "reputation.db"
 
 async def init_db():
@@ -19,15 +18,34 @@ async def init_db():
             author_id INTEGER,
             stars INTEGER,
             comment TEXT,
+            proof_url TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         await db.execute('''CREATE TABLE IF NOT EXISTS Settings (
             guild_id INTEGER PRIMARY KEY,
-            forum_channel_id INTEGER
+            forum_channel_id INTEGER,
+            verified_role_id INTEGER,
+            audit_role_id INTEGER
         )''')
+
+        # Identity Tracking
+        await db.execute('''CREATE TABLE IF NOT EXISTS NameHistory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            old_name TEXT,
+            new_name TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+
+        # Watchlist
+        await db.execute('''CREATE TABLE IF NOT EXISTS Watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            keyword TEXT
+        )''')
+        
         await db.commit()
     logging.info(f"Database initialized at {DB_PATH}")
 
 def get_db():
-    """Returns an async context manager for the database."""
     return aiosqlite.connect(DB_PATH)
