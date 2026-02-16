@@ -63,12 +63,24 @@ async def on_thread_create(thread):
         return
 
     owner = thread.owner
-    if not owner:
+
+    if not owner and thread.owner_id:
         try:
             owner = await thread.guild.fetch_member(thread.owner_id)
-        except discord.NotFound:
-            return
+        except Exception as e:
+            logging.warning(f"⚠️ Fetch Member failed: {e}")
 
+    if not owner:
+        try:
+            await asyncio.sleep(1)
+            starter_message = await thread.fetch_message(thread.id)
+            owner = starter_message.author
+        except Exception as e:
+            logging.warning(f"⚠️ Fetch Message failed: {e}")
+
+    if not owner:
+        logging.error(f"❌ Could not determine owner for thread {thread.id}. Skipping.")
+        return
     async with database.get_db() as db:
         db.row_factory = aiosqlite.Row
 
