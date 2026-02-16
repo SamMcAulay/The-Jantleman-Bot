@@ -176,17 +176,19 @@ async def on_thread_create(thread):
             embed.title = "🛑 High Risk Alert"
 
     embed.description = desc
-    await thread.send(embed=embed)
+    import asyncio 
 
-    content_to_scan = thread.name.lower()
-    await asyncio.sleep(1)
-    try:
-        starter_msg = await thread.fetch_message(thread.id)
-        if starter_msg:
-            content_to_scan += " " + starter_msg.content.lower()
-    except:
-        pass
-
+    for attempt in range(5):  
+        try:
+            await thread.send(embed=embed)
+            break  
+        except discord.Forbidden as e:
+            if e.code == 40058:  
+                logging.warning(f"⏳ Thread {thread.id} not ready yet. Waiting 2s... (Attempt {attempt+1}/5)")
+                await asyncio.sleep(2) 
+            else:
+                raise e
+    
     async with database.get_db() as db:
         async with db.execute("SELECT DISTINCT keyword FROM Watchlist") as cursor:
             all_keywords = await cursor.fetchall()
