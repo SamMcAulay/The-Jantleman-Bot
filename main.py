@@ -177,17 +177,31 @@ async def on_thread_create(thread):
 
     embed.description = desc
     import asyncio 
+    max_retries = 36
+    retry_delay = 5 
 
-    for attempt in range(5):  
+    for attempt in range(max_retries):
         try:
             await thread.send(embed=embed)
-            break  
+            if attempt > 0:
+                logging.info(f"✅ Success: Posted to thread {thread.id} after {attempt * retry_delay}s delay.")
+            break 
+        
         except discord.Forbidden as e:
-            if e.code == 40058:  
-                logging.warning(f"⏳ Thread {thread.id} not ready yet. Waiting 2s... (Attempt {attempt+1}/5)")
-                await asyncio.sleep(2) 
+            if e.code == 40058: 
+                if attempt % 2 == 0:
+                    logging.warning(f"⏳ Upload in progress for thread {thread.id}... Waiting {retry_delay}s (Attempt {attempt+1}/{max_retries})")
+                
+                await asyncio.sleep(retry_delay) 
             else:
-                raise e
+                logging.error(f"❌ Failed to post in thread {thread.id}: {e}")
+                break
+        
+        except Exception as e:
+            logging.error(f"❌ Unexpected error in thread {thread.id}: {e}")
+            break
+    else:
+        logging.error(f"❌ TIMEOUT: Gave up on thread {thread.id} after 3 minutes. Upload stuck or abandoned.")
     
     async with database.get_db() as db:
         async with db.execute("SELECT DISTINCT keyword FROM Watchlist") as cursor:
