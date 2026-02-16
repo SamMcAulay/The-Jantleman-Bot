@@ -356,8 +356,91 @@ class Reputation(commands.Cog):
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    blacklist_group = app_commands.Group(
+        name="blacklist", description="Manage banned users"
+    )
+
+    @blacklist_group.command(
+        name="add", description="Ban a user from posting in tracked channels"
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def blacklist_add(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        reason: str = "No reason provided",
+    ):
+        async with database.get_db() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,)
+            )
+            await db.execute(
+                "UPDATE Users SET is_blacklisted = 1 WHERE user_id = ?", (user.id,)
+            )
+            await db.commit()
+        await interaction.response.send_message(
+            f"⛔ **Blacklisted** {user.mention}.\nReason: {reason}", ephemeral=True
+        )
+
+    @blacklist_group.command(name="remove", description="Unban a user")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def blacklist_remove(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        async with database.get_db() as db:
+            await db.execute(
+                "UPDATE Users SET is_blacklisted = 0 WHERE user_id = ?", (user.id,)
+            )
+            await db.commit()
+        await interaction.response.send_message(
+            f"✅ Removed {user.mention} from the blacklist.", ephemeral=True
+        )
+
+    # --- LIMIT GROUP ---
+    limit_group = app_commands.Group(
+        name="limit", description="Manage posting cooldowns"
+    )
+
+    @limit_group.command(name="set", description="Limit a user to 1 post every X hours")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def limit_set(
+        self, interaction: discord.Interaction, user: discord.Member, hours: int
+    ):
+        if hours < 1:
+            return await interaction.response.send_message(
+                "❌ Hours must be at least 1.", ephemeral=True
+            )
+
+        async with database.get_db() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,)
+            )
+            await db.execute(
+                "UPDATE Users SET post_limit_hours = ? WHERE user_id = ?",
+                (hours, user.id),
+            )
+            await db.commit()
+        await interaction.response.send_message(
+            f"⏱️ **Limit Set:** {user.mention} can now only post once every **{hours} hours**.",
+            ephemeral=True,
+        )
+
+    @limit_group.command(name="remove", description="Remove posting limit for a user")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def limit_remove(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        async with database.get_db() as db:
+            await db.execute(
+                "UPDATE Users SET post_limit_hours = NULL WHERE user_id = ?", (user.id,)
+            )
+            await db.commit()
+        await interaction.response.send_message(
+            f"✅ **Limit Removed:** {user.mention} can post freely.", ephemeral=True
+        )
+
     @app_commands.command(
-        name="leaderboard", description="🏆 View the most reputable members"
+        name="leaderboard", description="View the most reputable members"
     )
     async def leaderboard(self, interaction: discord.Interaction):
         await interaction.response.defer()

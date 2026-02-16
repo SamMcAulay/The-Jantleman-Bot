@@ -8,6 +8,7 @@ import database
 import aiosqlite
 from datetime import datetime, timedelta
 
+# Logging Setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 load_dotenv()
 
@@ -57,24 +58,71 @@ async def on_thread_create(thread):
             (thread.guild.id, thread.parent_id),
         ) as cursor:
             is_monitored = await cursor.fetchone()
+
     if not is_monitored:
         return
+
     owner = thread.owner
     if not owner:
         return
 
     async with database.get_db() as db:
         db.row_factory = aiosqlite.Row
+
+        async with db.execute(
+            "SELECT * FROM Users WHERE user_id = ?", (owner.id,)
+        ) as cursor:
+            user_data = await cursor.fetchone()
+
+        if user_data and user_data["is_blacklisted"]:
+            await thread.delete()
+            try:
+                await owner.send(
+                    f"⛔ **Access Denied.**\nYou are blacklisted from posting in {thread.parent.mention}."
+                )
+            except:
+                pass
+            return
+
+        if (
+            user_data
+            and user_data["post_limit_hours"]
+            and user_data["last_post_timestamp"]
+        ):
+            last_post = datetime.strptime(
+                user_data["last_post_timestamp"], "%Y-%m-%d %H:%M:%S"
+            )
+            diff = datetime.now() - last_post
+            limit_hours = user_data["post_limit_hours"]
+
+            if diff < timedelta(hours=limit_hours):
+                remaining = int(
+                    (timedelta(hours=limit_hours) - diff).total_seconds() / 60
+                )
+                await thread.delete()
+                try:
+                    await owner.send(
+                        f"⏱️ **Cooldown Active**\nYou are limited to one post every {limit_hours} hours.\nPlease wait **{remaining} minutes** before posting again."
+                    )
+                except:
+                    pass
+                return  # Stop here
+
+        await db.execute(
+            "INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (owner.id,)
+        )
+        await db.execute(
+            "UPDATE Users SET last_post_timestamp = ? WHERE user_id = ?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), owner.id),
+        )
+        await db.commit()
+
         async with db.execute(
             "SELECT track_identity FROM Settings WHERE guild_id = ?", (thread.guild.id,)
         ) as cursor:
             settings = await cursor.fetchone()
             tracking_enabled = settings["track_identity"] if settings else True
-        async with db.execute(
-            "SELECT total_stars, total_reviews FROM Users WHERE user_id = ?",
-            (owner.id,),
-        ) as cursor:
-            rep_data = await cursor.fetchone()
+
         change_count = 0
         if tracking_enabled:
             seven_days_ago = datetime.now() - timedelta(days=7)
@@ -90,16 +138,17 @@ async def on_thread_create(thread):
         text="The Jantleman • Automated Check", icon_url=bot.user.display_avatar.url
     )
     embed.set_thumbnail(url=owner.display_avatar.url)
-    if not rep_data or rep_data["total_reviews"] == 0:
+
+    if not user_data or user_data["total_reviews"] == 0:
         embed.title = "⚠️ New Member Alert"
         embed.color = 0xFFA500
         desc = f"**User:** {owner.mention}\nHas **0** recorded reviews."
     else:
-        avg = round(rep_data["total_stars"] / rep_data["total_reviews"], 1)
+        avg = round(user_data["total_stars"] / user_data["total_reviews"], 1)
         stars = ("⭐" * int(avg)) + ("☆" * (5 - int(avg)))
         embed.title = "✅ Established Member"
         embed.color = discord.Color.gold()
-        desc = f"**User:** {owner.mention}\n**Rating:** {stars} ({avg}/5)\n**Reviews:** {rep_data['total_reviews']}"
+        desc = f"**User:** {owner.mention}\n**Rating:** {stars} ({avg}/5)\n**Reviews:** {user_data['total_reviews']}"
 
     if tracking_enabled and change_count > 0:
         embed.add_field(
@@ -147,7 +196,7 @@ async def on_thread_create(thread):
                 if user_obj:
                     try:
                         dm_embed = discord.Embed(
-                            title="🔔 Alert!",
+                            title="🔔 Market Alert!",
                             description=f"A new thread matched your watchlist.\n\n**Thread:** {thread.mention}\n**Matched:** {', '.join(matched_keywords)}",
                             color=discord.Color.blue(),
                         )
