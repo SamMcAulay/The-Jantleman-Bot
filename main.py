@@ -64,7 +64,10 @@ async def on_thread_create(thread):
 
     owner = thread.owner
     if not owner:
-        return
+        try:
+            owner = await thread.guild.fetch_member(thread.owner_id)
+        except discord.NotFound:
+            return
 
     async with database.get_db() as db:
         db.row_factory = aiosqlite.Row
