@@ -140,4 +140,111 @@ async def on_thread_create(thread):
                 "SELECT COUNT(*) FROM NameHistory WHERE user_id = ? AND timestamp > ?",
                 (owner.id, seven_days_ago),
             ) as cursor:
-                name_changes = await cursor
+                name_changes = await cursor.fetchone()
+                change_count = name_changes[0] if name_changes else 0
+
+    embed = discord.Embed(timestamp=datetime.now())
+    embed.set_footer(
+        text="The Jantleman • Automated Check", icon_url=bot.user.display_avatar.url
+    )
+    embed.set_thumbnail(url=owner.display_avatar.url)
+
+    if not user_data or user_data["total_reviews"] == 0:
+        embed.title = "⚠️ New Member Alert"
+        embed.color = 0xFFA500
+        desc = f"**User:** {owner.mention}\nHas **0** recorded reviews."
+    else:
+        avg = round(user_data["total_stars"] / user_data["total_reviews"], 1)
+        stars = ("⭐" * int(avg)) + ("☆" * (5 - int(avg)))
+        embed.title = "✅ Established Member"
+        embed.color = discord.Color.gold()
+        desc = f"**User:** {owner.mention}\n**Rating:** {stars} ({avg}/5)\n**Reviews:** {user_data['total_reviews']}"
+
+    if tracking_enabled and change_count > 0:
+        embed.add_field(
+            name="⚠️ Identity Alert",
+            value=f"Changed name **{change_count} times** in the last 7 days.",
+            inline=False,
+        )
+        if change_count >= 3:
+            embed.color = discord.Color.red()
+            embed.title = "🛑 High Risk Alert"
+
+    embed.description = desc
+    
+    max_retries = 36
+    retry_delay = 5
+
+    for attempt in range(max_retries):
+        try:
+            await thread.send(embed=embed)
+            if attempt > 0:
+                logging.info(f"✅ Success: Posted to thread {thread.id} after {attempt * retry_delay}s delay.")
+            break
+        
+        except discord.Forbidden as e:
+            if e.code == 40058:
+                if attempt % 2 == 0:
+                    logging.warning(f"⏳ Upload in progress for thread {thread.id}... Waiting {retry_delay}s (Attempt {attempt+1}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+            else:
+                logging.error(f"❌ Failed to post in thread {thread.id}: {e}")
+                break
+        
+        except Exception as e:
+            logging.error(f"❌ Unexpected error in thread {thread.id}: {e}")
+            break
+    else:
+        logging.error(f"❌ TIMEOUT: Gave up on thread {thread.id} after 3 minutes. Upload stuck or abandoned.")
+        return
+
+    content_to_scan = thread.name.lower()
+
+    try:
+        starter_msg = await thread.fetch_message(thread.id)
+        if starter_msg:
+            content_to_scan += " " + starter_msg.content.lower()
+    except:
+        pass
+
+    async with database.get_db() as db:
+        async with db.execute("SELECT DISTINCT keyword FROM Watchlist") as cursor:
+            all_keywords = await cursor.fetchall()
+
+        matched_keywords = []
+        for (kw,) in all_keywords:
+            if kw in content_to_scan:
+                matched_keywords.append(kw)
+
+        if matched_keywords:
+            placeholders = ",".join("?" for _ in matched_keywords)
+            async with db.execute(
+                f"SELECT DISTINCT user_id FROM Watchlist WHERE keyword IN ({placeholders})",
+                tuple(matched_keywords),
+            ) as cursor:
+                users_to_alert = await cursor.fetchall()
+
+            for (uid,) in users_to_alert:
+                if uid == owner.id:
+                    continue
+                user_obj = thread.guild.get_member(uid)
+                if user_obj:
+                    try:
+                        dm_embed = discord.Embed(
+                            title="🔔 Market Alert!",
+                            description=f"A new thread matched your watchlist.\n\n**Thread:** {thread.mention}\n**Matched:** {', '.join(matched_keywords)}",
+                            color=discord.Color.blue(),
+                        )
+                        await user_obj.send(embed=dm_embed)
+                    except discord.Forbidden:
+                        pass
+
+async def main():
+    async with bot:
+        await bot.start(os.getenv("DISCORD_TOKEN"))
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
