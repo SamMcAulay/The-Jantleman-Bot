@@ -33,54 +33,75 @@ class Reputation(commands.Cog):
             ) as cursor:
                 return await cursor.fetchone()
 
-    @app_commands.command(name="setup", description="Configure bot settings")
+    @app_commands.command(name="setup", description="Configure server rules and roles")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(
-        verified_role="Role required to give reviews",
-        audit_role="Role allowing access to logs",
         name_tracking="Enable/Disable identity tracking alerts",
         proof="Requirement for screenshots on reviews",
+        verified_role_1="Main role for trusted members",
+        verified_role_2="(Optional) Additional trusted role",
+        verified_role_3="(Optional) Additional trusted role",
+        audit_role_1="Main role for staff/audit access",
+        audit_role_2="(Optional) Additional staff role",
         monitor_channel="(Optional) Add a channel to track immediately",
     )
     @app_commands.choices(
         proof=[
-            app_commands.Choice(name="Required", value="required"),
-            app_commands.Choice(name="Optional", value="optional"),
-            app_commands.Choice(name="Off", value="off"),
+            app_commands.Choice(name="Required (Strict)", value="required"),
+            app_commands.Choice(name="Optional (Flexible)", value="optional"),
+            app_commands.Choice(name="Off (No Screenshots)", value="off"),
         ]
     )
     async def setup(
         self,
         interaction: discord.Interaction,
-        verified_role: discord.Role,
-        audit_role: discord.Role,
         name_tracking: bool = True,
         proof: app_commands.Choice[str] = None,
+        verified_role_1: discord.Role = None,
+        verified_role_2: discord.Role = None,
+        verified_role_3: discord.Role = None,
+        audit_role_1: discord.Role = None,
+        audit_role_2: discord.Role = None,
         monitor_channel: discord.ForumChannel = None,
     ):
         proof_setting = proof.value if proof else "required"
+
+        v_roles = [
+            r
+            for r in [verified_role_1, verified_role_2, verified_role_3]
+            if r is not None
+        ]
+        a_roles = [r for r in [audit_role_1, audit_role_2] if r is not None]
 
         await interaction.response.defer(ephemeral=True)
         try:
             async with database.get_db() as db:
                 await db.execute(
                     """
-                    INSERT INTO Settings (guild_id, verified_role_id, audit_role_id, track_identity, proof_req) 
-                    VALUES (?, ?, ?, ?, ?) 
+                    INSERT INTO Settings (guild_id, track_identity, proof_req) 
+                    VALUES (?, ?, ?) 
                     ON CONFLICT(guild_id) DO UPDATE SET 
-                        verified_role_id = excluded.verified_role_id,
-                        audit_role_id = excluded.audit_role_id,
                         track_identity = excluded.track_identity,
                         proof_req = excluded.proof_req
                 """,
-                    (
-                        interaction.guild_id,
-                        verified_role.id,
-                        audit_role.id,
-                        name_tracking,
-                        proof_setting,
-                    ),
+                    (interaction.guild_id, name_tracking, proof_setting),
                 )
+
+                await db.execute(
+                    "DELETE FROM GuildRoles WHERE guild_id = ?", (interaction.guild_id,)
+                )
+
+                for role in v_roles:
+                    await db.execute(
+                        "INSERT INTO GuildRoles (guild_id, role_id, role_type) VALUES (?, ?, ?)",
+                        (interaction.guild_id, role.id, "verified"),
+                    )
+
+                for role in a_roles:
+                    await db.execute(
+                        "INSERT INTO GuildRoles (guild_id, role_id, role_type) VALUES (?, ?, ?)",
+                        (interaction.guild_id, role.id, "audit"),
+                    )
 
                 if monitor_channel:
                     await db.execute(
@@ -90,14 +111,16 @@ class Reputation(commands.Cog):
 
                 await db.commit()
 
-            desc = (
-                f"**Verified Role:** {verified_role.mention}\n"
-                f"**Audit Role:** {audit_role.mention}\n"
-                f"**Name Tracking:** {'✅ On' if name_tracking else '❌ Off'}\n"
-                f"**Proof Logic:** {proof_setting.capitalize()}"
-            )
+            desc = f"**Name Tracking:** {'✅ On' if name_tracking else '❌ Off'}\n**Proof Logic:** {proof_setting.capitalize()}\n\n"
+
+            desc += "**✅ Verified Roles:**\n"
+            desc += ", ".join([r.mention for r in v_roles]) if v_roles else "*None set*"
+
+            desc += "\n\n**🛡️ Audit Roles:**\n"
+            desc += ", ".join([r.mention for r in a_roles]) if a_roles else "*None set*"
+
             if monitor_channel:
-                desc += f"\n**Added Channel:** {monitor_channel.mention}"
+                desc += f"\n\n**Added Channel:** {monitor_channel.mention}"
 
             embed = self.create_embed(
                 "⚙️ Configuration Saved", desc, discord.Color.green()
@@ -161,32 +184,35 @@ class Reputation(commands.Cog):
             db.row_factory = aiosqlite.Row
 
             async with db.execute(
-                "SELECT verified_role_id, proof_req FROM Settings WHERE guild_id = ?",
+                "SELECT proof_req FROM Settings WHERE guild_id = ?",
                 (interaction.guild_id,),
             ) as cursor:
                 setting = await cursor.fetchone()
+                proof_req = setting["proof_req"] if setting else "required"
 
-            if not setting:
-                return await interaction.response.send_message(
-                    "❌ Bot not set up. Ask an admin to run /setup.", ephemeral=True
-                )
+            async with db.execute(
+                "SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'verified'",
+                (interaction.guild_id,),
+            ) as cursor:
+                valid_roles = [row["role_id"] for row in await cursor.fetchall()]
 
-            if setting["verified_role_id"]:
-                role = interaction.guild.get_role(setting["verified_role_id"])
-                if role not in interaction.user.roles:
+            if valid_roles:
+                user_role_ids = [r.id for r in interaction.user.roles]
+                if not any(rid in user_role_ids for rid in valid_roles):
+                    display_roles = valid_roles[:3]
+                    allowed_mentions = " ".join([f"<@&{rid}>" for rid in display_roles])
                     return await interaction.response.send_message(
-                        f"⛔ You need the {role.mention} role to leave reviews.",
+                        f"⛔ You need one of these roles to review: {allowed_mentions}",
                         ephemeral=True,
                     )
 
-            req = setting["proof_req"]
-            if req == "required" and not proof:
+            if proof_req == "required" and not proof:
                 return await interaction.response.send_message(
                     "📸 **Proof Required:** This server requires a screenshot attachment for all reviews.",
                     ephemeral=True,
                 )
             if (
-                req == "required"
+                proof_req == "required"
                 and proof
                 and not proof.content_type.startswith("image/")
             ):
@@ -300,20 +326,19 @@ class Reputation(commands.Cog):
     async def audit(self, interaction: discord.Interaction, user: discord.Member):
         is_admin = interaction.user.guild_permissions.administrator
         has_role = False
+
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT audit_role_id FROM Settings WHERE guild_id = ?",
+                "SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'audit'",
                 (interaction.guild_id,),
             ) as cursor:
-                setting = await cursor.fetchone()
-                if (
-                    setting
-                    and setting["audit_role_id"]
-                    and interaction.guild.get_role(setting["audit_role_id"])
-                    in interaction.user.roles
-                ):
-                    has_role = True
+                valid_roles = [row["role_id"] for row in await cursor.fetchall()]
+
+        if valid_roles:
+            user_role_ids = [r.id for r in interaction.user.roles]
+            if any(rid in user_role_ids for rid in valid_roles):
+                has_role = True
 
         if not is_admin and not has_role:
             return await interaction.response.send_message(
@@ -356,6 +381,39 @@ class Reputation(commands.Cog):
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(
+        name="leaderboard", description="🏆 View the most reputable members"
+    )
+    async def leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT user_id, total_reviews, total_stars FROM Users WHERE total_reviews > 0 ORDER BY total_reviews DESC LIMIT 10"
+            ) as cursor:
+                top_traders = await cursor.fetchall()
+
+        if not top_traders:
+            return await interaction.followup.send("The ledger is empty.")
+
+        embed = self.create_embed(
+            title="🏆 Hall of Fame",
+            description="Top 10 Most Reviewed Members",
+            color=discord.Color.gold(),
+        )
+        for i, row in enumerate(top_traders, 1):
+            user = interaction.guild.get_member(row["user_id"])
+            name = user.display_name if user else "Unknown User"
+            avg = round(row["total_stars"] / row["total_reviews"], 1)
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"#{i}"
+            embed.add_field(
+                name=f"{medal} {name}",
+                value=f"**{row['total_reviews']}** Reviews • **{avg}** ⭐",
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed)
+
     blacklist_group = app_commands.Group(
         name="blacklist", description="Manage banned users"
     )
@@ -396,7 +454,6 @@ class Reputation(commands.Cog):
             f"✅ Removed {user.mention} from the blacklist.", ephemeral=True
         )
 
-    # --- LIMIT GROUP ---
     limit_group = app_commands.Group(
         name="limit", description="Manage posting cooldowns"
     )
@@ -438,39 +495,6 @@ class Reputation(commands.Cog):
         await interaction.response.send_message(
             f"✅ **Limit Removed:** {user.mention} can post freely.", ephemeral=True
         )
-
-    @app_commands.command(
-        name="leaderboard", description="View the most reputable members"
-    )
-    async def leaderboard(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-
-        async with database.get_db() as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT user_id, total_reviews, total_stars FROM Users WHERE total_reviews > 0 ORDER BY total_reviews DESC LIMIT 10"
-            ) as cursor:
-                top_traders = await cursor.fetchall()
-
-        if not top_traders:
-            return await interaction.followup.send("The ledger is empty.")
-
-        embed = self.create_embed(
-            title="🏆 Hall of Fame",
-            description="Top 10 Most Reviewed Members",
-            color=discord.Color.gold(),
-        )
-        for i, row in enumerate(top_traders, 1):
-            user = interaction.guild.get_member(row["user_id"])
-            name = user.display_name if user else "Unknown User"
-            avg = round(row["total_stars"] / row["total_reviews"], 1)
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"#{i}"
-            embed.add_field(
-                name=f"{medal} {name}",
-                value=f"**{row['total_reviews']}** Reviews • **{avg}** ⭐",
-                inline=False,
-            )
-        await interaction.followup.send(embed=embed)
 
     @setup.error
     async def setup_error(

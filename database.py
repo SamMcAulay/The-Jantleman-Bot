@@ -32,6 +32,12 @@ async def init_db():
             channel_id INTEGER,
             PRIMARY KEY (guild_id, channel_id)
         )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS GuildRoles (
+            guild_id INTEGER,
+            role_id INTEGER,
+            role_type TEXT,
+            PRIMARY KEY (guild_id, role_id, role_type)
+        )""")
 
         await db.commit()
     logging.info(f"Database initialized at {DB_PATH}")
