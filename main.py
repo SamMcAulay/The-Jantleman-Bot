@@ -172,8 +172,8 @@ async def on_thread_create(thread):
 
     embed.description = desc
     
-    max_retries = 36
-    retry_delay = 5
+    max_retries = 50
+    retry_delay = 2
 
     for attempt in range(max_retries):
         try:
