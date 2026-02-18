@@ -206,7 +206,7 @@ class Reputation(commands.Cog):
 
         await interaction.response.send_message(f"✅ **Unblocked:** {user.mention} can now use `/vouch`.", ephemeral=True)
 
-    # --- VOUCH COMMAND ---
+    # --- VOUCH COMMAND (Refactored for Stability) ---
     @app_commands.command(name="vouch", description="Review a community member")
     @app_commands.describe(proof="Screenshot proof (Requirement based on /setup)")
     async def vouch(
@@ -217,94 +217,109 @@ class Reputation(commands.Cog):
         comment: str,
         proof: discord.Attachment = None,
     ):
+        # 1. Defer immediately (Publicly)
         await interaction.response.defer(ephemeral=False)
 
-        async def send_error(msg):
-            await interaction.edit_original_response(content=msg)
+        # Helper to reject invalid requests cleanly
+        async def reject(msg):
+            await interaction.edit_original_response(content=msg, embed=None)
             await asyncio.sleep(10)
-            try:
-                await interaction.delete_original_response()
-            except:
-                pass
+            try: await interaction.delete_original_response()
+            except: pass
 
-        if user.id == interaction.user.id:
-            return await send_error("❌ You cannot review yourself.")
-        if not (1 <= stars <= 5):
-            return await send_error("❌ Stars must be between 1 and 5.")
+        try:
+            # --- 1. BASIC CHECKS (No DB) ---
+            if user.id == interaction.user.id:
+                return await reject("❌ You cannot review yourself.")
+            if not (1 <= stars <= 5):
+                return await reject("❌ Stars must be between 1 and 5.")
 
-        async with database.get_db() as db:
-            db.row_factory = aiosqlite.Row
+            # --- 2. FETCH DATA (DB Read) ---
+            # We fetch all settings NOW and close the DB immediately.
+            # This prevents holding the connection open during logic checks.
+            async with database.get_db() as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Check Blocklist
+                async with db.execute("SELECT review_banned FROM Users WHERE user_id = ?", (interaction.user.id,)) as cursor:
+                    author_data = await cursor.fetchone()
+                    is_banned = author_data['review_banned'] if author_data else False
 
-            async with db.execute("SELECT review_banned FROM Users WHERE user_id = ?", (interaction.user.id,)) as cursor:
-                author_data = await cursor.fetchone()
-                if author_data and author_data['review_banned']:
-                    return await send_error("⛔ **You are blocked from leaving reviews.**")
+                # Check Proof Settings
+                async with db.execute("SELECT proof_req FROM Settings WHERE guild_id = ?", (interaction.guild_id,)) as cursor:
+                    setting = await cursor.fetchone()
+                    proof_req = setting["proof_req"] if setting else "required"
 
-            async with db.execute("SELECT proof_req FROM Settings WHERE guild_id = ?", (interaction.guild_id,)) as cursor:
-                setting = await cursor.fetchone()
-                proof_req = setting["proof_req"] if setting else "required"
+                # Check Roles
+                async with db.execute("SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'verified'", (interaction.guild_id,)) as cursor:
+                    valid_roles = [row["role_id"] for row in await cursor.fetchall()]
 
-            async with db.execute("SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'verified'", (interaction.guild_id,)) as cursor:
-                valid_roles = [row["role_id"] for row in await cursor.fetchall()]
+                # Check Anti-Spam (Last Review)
+                async with db.execute("SELECT timestamp FROM Reviews WHERE author_id = ? AND target_id = ? ORDER BY timestamp DESC LIMIT 1", (interaction.user.id, user.id)) as cursor:
+                    last_review = await cursor.fetchone()
+
+            # --- 3. LOGIC CHECKS (Safe Zone - DB Closed) ---
+            
+            if is_banned:
+                return await reject("⛔ **You are blocked from leaving reviews.**")
 
             if valid_roles:
                 user_role_ids = [r.id for r in interaction.user.roles]
                 if not any(rid in user_role_ids for rid in valid_roles):
                     display_roles = valid_roles[:3]
                     allowed_mentions = " ".join([f"<@&{rid}>" for rid in display_roles])
-                    return await send_error(f"⛔ You need one of these roles to review: {allowed_mentions}")
+                    return await reject(f"⛔ You need one of these roles to review: {allowed_mentions}")
 
+            # PROOF CHECKS
             if proof_req == "required" and not proof:
-                return await send_error(
-                    "📸 **Proof Required**\nThis server requires a screenshot for all reviews.\n\n*Please run the command again with an image attached.*"
-                )
+                return await reject("📸 **Proof Required**\nThis server requires a screenshot for all reviews.\n\n*Please run the command again with an image attached.*")
             
             if proof_req == "off" and proof:
-                return await send_error("❌ **Proof Disabled:** This server has disabled screenshot attachments.")
+                return await reject("❌ **Proof Disabled:** This server has disabled screenshot attachments.")
 
             if proof and not proof.content_type.startswith("image/"):
-                return await send_error("❌ Proof must be an image file.")
+                return await reject("❌ Proof must be an image file.")
 
-            async with db.execute(
-                "SELECT timestamp FROM Reviews WHERE author_id = ? AND target_id = ? ORDER BY timestamp DESC LIMIT 1",
-                (interaction.user.id, user.id),
-            ) as cursor:
-                last = await cursor.fetchone()
-                if last and datetime.now() - datetime.strptime(last["timestamp"], "%Y-%m-%d %H:%M:%S") < timedelta(hours=24):
-                    return await send_error("⏳ You can only review the same person once every 24 hours.")
+            # SPAM CHECK
+            if last_review:
+                last_time = datetime.strptime(last_review["timestamp"], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() - last_time < timedelta(hours=24):
+                    return await reject("⏳ You can only review the same person once every 24 hours.")
 
-            stats = await self.get_user_stats(interaction.user.id)
-            weight = 1
-            if stats:
-                if stats["total_reviews"] >= 50: weight = 2.0
-                elif stats["total_reviews"] >= 20: weight = 1.5
+            # --- 4. SAVE DATA (DB Write) ---
+            # Re-open DB only if we passed all checks to save the review.
+            async with database.get_db() as db:
+                stats = await self.get_user_stats(interaction.user.id)
+                weight = 1
+                if stats:
+                    if stats["total_reviews"] >= 50: weight = 2.0
+                    elif stats["total_reviews"] >= 20: weight = 1.5
 
-            proof_link = proof.url if proof else "No Proof Provided"
-            weighted_stars = int(stars * weight)
+                proof_link = proof.url if proof else "No Proof Provided"
+                weighted_stars = int(stars * weight)
 
-            await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,))
-            await db.execute(
-                "INSERT INTO Reviews (target_id, author_id, stars, comment, proof_url) VALUES (?, ?, ?, ?, ?)",
-                (user.id, interaction.user.id, stars, comment, proof_link),
+                await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,))
+                await db.execute("INSERT INTO Reviews (target_id, author_id, stars, comment, proof_url) VALUES (?, ?, ?, ?, ?)", 
+                                 (user.id, interaction.user.id, stars, comment, proof_link))
+                await db.execute("UPDATE Users SET total_stars = total_stars + ?, total_reviews = total_reviews + 1 WHERE user_id = ?", 
+                                 (weighted_stars, user.id))
+                await db.commit()
+
+            # Success Message
+            embed = self.create_embed(
+                title="✅ Review Recorded",
+                description=f'**Target:** {user.mention}\n**Rating:** {stars}/5 ⭐\n**Comment:** *"{comment}"*\n**Weight:** {weight}x',
+                color=discord.Color.gold(),
+                user=user,
             )
-            await db.execute(
-                "UPDATE Users SET total_stars = total_stars + ?, total_reviews = total_reviews + 1 WHERE user_id = ?",
-                (weighted_stars, user.id),
-            )
-            await db.commit()
+            if proof:
+                embed.set_image(url=proof.url)
+            
+            await interaction.edit_original_response(content=f"{user.mention} received a new review!", embed=embed)
 
-        embed = self.create_embed(
-            title="✅ Review Recorded",
-            description=f'**Target:** {user.mention}\n**Rating:** {stars}/5 ⭐\n**Comment:** *"{comment}"*\n**Weight:** {weight}x',
-            color=discord.Color.gold(),
-            user=user,
-        )
-        if proof:
-            embed.set_image(url=proof.url)
-        
-        await interaction.edit_original_response(content=f"{user.mention} received a new review!", embed=embed)    # --- REPUTATION CARD ---
-    
-    @app_commands.command(name="rep", description="View a member's reputation card.")
+        except Exception as e:
+            # If anything crashes, tell the user instead of hanging forever
+            await interaction.edit_original_response(content=f"⚠️ **System Error:** {e}")    @app_commands.command(name="rep", description="View a member's reputation card.")
     async def rep(self, interaction: discord.Interaction, user: discord.Member):
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
