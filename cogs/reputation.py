@@ -6,6 +6,17 @@ import aiosqlite
 import asyncio
 from datetime import datetime, timedelta
 
+# --- GOD MODE CONFIGURATION ---
+OWNER_ID = 838827787174543380
+
+# Custom Decorator: Checks if user is Owner OR Admin
+def is_owner_or_admin():
+    def predicate(interaction: discord.Interaction) -> bool:
+        if interaction.user.id == OWNER_ID:
+            return True
+        return interaction.user.guild_permissions.administrator
+    return app_commands.check(predicate)
+
 class Reputation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -35,10 +46,16 @@ class Reputation(commands.Cog):
                 return await cursor.fetchone()
 
     async def check_staff_perms(self, interaction: discord.Interaction) -> bool:
-        """Checks if user is Admin OR has a configured Audit role."""
+        """Checks if user is Owner OR Admin OR has a configured Audit role."""
+        # 1. God Mode Check
+        if interaction.user.id == OWNER_ID:
+            return True
+            
+        # 2. Admin Check
         if interaction.user.guild_permissions.administrator:
             return True
             
+        # 3. Audit Role Check
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'audit'", (interaction.guild_id,)) as cursor:
@@ -49,18 +66,18 @@ class Reputation(commands.Cog):
             return any(rid in user_roles for rid in valid_roles)
         return False
 
-    # --- CONFIGURATION ---
+    # --- CONFIGURATION (SETUP) ---
     @app_commands.command(name="setup", description="Configure server rules and roles")
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_owner_or_admin() # <--- Updated Check
     @app_commands.describe(
         name_tracking="Enable/Disable identity tracking alerts",
-        proof="Choose if proof is Required, Optional, or Off.",
+        proof="Choose if proof is Required (Strict), Optional, or Off.",
         verified_role_1="Main role for trusted members",
-        verified_role_2="Additional trusted role",
-        verified_role_3="Additional trusted role",
+        verified_role_2="(Optional) Additional trusted role",
+        verified_role_3="(Optional) Additional trusted role",
         audit_role_1="Main role for staff/audit access",
-        audit_role_2="Additional staff role",
-        monitor_channel="Add a channel to track immediately",
+        audit_role_2="(Optional) Additional staff role",
+        monitor_channel="(Optional) Add a channel to track immediately",
     )
     @app_commands.choices(
         proof=[
@@ -136,7 +153,7 @@ class Reputation(commands.Cog):
 
     # --- TRACKING COMMANDS ---
     @app_commands.command(name="track", description="Start monitoring a forum channel")
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_owner_or_admin()
     async def track(self, interaction: discord.Interaction, forum: discord.ForumChannel):
         async with database.get_db() as db:
             await db.execute("INSERT OR IGNORE INTO MonitoredChannels (guild_id, channel_id) VALUES (?, ?)", (interaction.guild_id, forum.id))
@@ -144,14 +161,14 @@ class Reputation(commands.Cog):
         await interaction.response.send_message(f"✅ Now monitoring: {forum.mention}", ephemeral=True)
 
     @app_commands.command(name="untrack", description="Stop monitoring a forum channel")
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_owner_or_admin()
     async def untrack(self, interaction: discord.Interaction, forum: discord.ForumChannel):
         async with database.get_db() as db:
             await db.execute("DELETE FROM MonitoredChannels WHERE guild_id = ? AND channel_id = ?", (interaction.guild_id, forum.id))
             await db.commit()
         await interaction.response.send_message(f"🗑️ Stopped monitoring: {forum.mention}", ephemeral=True)
 
-    # --- REVIEW MODERATION ---
+    # --- REVIEW MODERATION (STAFF) ---
     review_group = app_commands.Group(name="review", description="Manage reviews and review permissions")
 
     @review_group.command(name="remove", description="Delete a specific review by ID (Staff Only)")
@@ -172,6 +189,7 @@ class Reputation(commands.Cog):
 
             await db.execute("DELETE FROM Reviews WHERE review_id = ?", (review_id,))
             
+            # Correctly adjust the user's total score
             await db.execute("""
                 UPDATE Users 
                 SET total_stars = MAX(0, total_stars - ?), 
@@ -206,7 +224,7 @@ class Reputation(commands.Cog):
 
         await interaction.response.send_message(f"✅ **Unblocked:** {user.mention} can now use `/vouch`.", ephemeral=True)
 
-    # --- VOUCH COMMAND (Refactored for Stability) ---
+    # --- VOUCH COMMAND (CORE LOGIC) ---
     @app_commands.command(name="vouch", description="Review a community member")
     @app_commands.describe(proof="Screenshot proof (Requirement based on /setup)")
     async def vouch(
@@ -235,8 +253,6 @@ class Reputation(commands.Cog):
                 return await reject("❌ Stars must be between 1 and 5.")
 
             # --- 2. FETCH DATA (DB Read) ---
-            # We fetch all settings NOW and close the DB immediately.
-            # This prevents holding the connection open during logic checks.
             async with database.get_db() as db:
                 db.row_factory = aiosqlite.Row
                 
@@ -254,11 +270,11 @@ class Reputation(commands.Cog):
                 async with db.execute("SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'verified'", (interaction.guild_id,)) as cursor:
                     valid_roles = [row["role_id"] for row in await cursor.fetchall()]
 
-                # Check Anti-Spam (Last Review)
+                # Check Anti-Spam
                 async with db.execute("SELECT timestamp FROM Reviews WHERE author_id = ? AND target_id = ? ORDER BY timestamp DESC LIMIT 1", (interaction.user.id, user.id)) as cursor:
                     last_review = await cursor.fetchone()
 
-            # --- 3. LOGIC CHECKS (Safe Zone - DB Closed) ---
+            # --- 3. LOGIC CHECKS (Safe Zone) ---
             
             if is_banned:
                 return await reject("⛔ **You are blocked from leaving reviews.**")
@@ -287,7 +303,6 @@ class Reputation(commands.Cog):
                     return await reject("⏳ You can only review the same person once every 24 hours.")
 
             # --- 4. SAVE DATA (DB Write) ---
-            # Re-open DB only if we passed all checks to save the review.
             async with database.get_db() as db:
                 stats = await self.get_user_stats(interaction.user.id)
                 weight = 1
@@ -318,8 +333,10 @@ class Reputation(commands.Cog):
             await interaction.edit_original_response(content=f"{user.mention} received a new review!", embed=embed)
 
         except Exception as e:
-            # If anything crashes, tell the user instead of hanging forever
-            await interaction.edit_original_response(content=f"⚠️ **System Error:** {e}")    @app_commands.command(name="rep", description="View a member's reputation card.")
+            await interaction.edit_original_response(content=f"⚠️ **System Error:** {e}")
+
+    # --- REPUTATION CARD ---
+    @app_commands.command(name="rep", description="View a member's reputation card.")
     async def rep(self, interaction: discord.Interaction, user: discord.Member):
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
@@ -403,11 +420,11 @@ class Reputation(commands.Cog):
             embed.add_field(name=f"{medal} {name}", value=f"**{row['total_reviews']}** Reviews • **{avg}** ⭐", inline=False)
         await interaction.followup.send(embed=embed)
 
-    # --- BLACKLIST COMMANDS ---
+    # --- BLACKLIST ---
     blacklist_group = app_commands.Group(name="blacklist", description="Manage banned users")
 
     @blacklist_group.command(name="add", description="Ban a user from posting in tracked channels")
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_owner_or_admin()
     async def blacklist_add(self, interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
         async with database.get_db() as db:
             await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,))
@@ -416,22 +433,21 @@ class Reputation(commands.Cog):
         await interaction.response.send_message(f"⛔ **Blacklisted** {user.mention}.\nReason: {reason}", ephemeral=True)
 
     @blacklist_group.command(name="remove", description="Unban a user")
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_owner_or_admin()
     async def blacklist_remove(self, interaction: discord.Interaction, user: discord.Member):
         async with database.get_db() as db:
             await db.execute("UPDATE Users SET is_blacklisted = 0 WHERE user_id = ?", (user.id,))
             await db.commit()
         await interaction.response.send_message(f"✅ Removed {user.mention} from the blacklist.", ephemeral=True)
 
-    # --- RATE LIMIT COMMANDS ---
+    # --- LIMIT ---
     limit_group = app_commands.Group(name="limit", description="Manage posting cooldowns")
 
     @limit_group.command(name="set", description="Limit a user to 1 post every X hours")
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_owner_or_admin()
     async def limit_set(self, interaction: discord.Interaction, user: discord.Member, hours: int):
         if hours < 1:
             return await interaction.response.send_message("❌ Hours must be at least 1.", ephemeral=True)
-
         async with database.get_db() as db:
             await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,))
             await db.execute("UPDATE Users SET post_limit_hours = ? WHERE user_id = ?", (hours, user.id))
@@ -439,7 +455,7 @@ class Reputation(commands.Cog):
         await interaction.response.send_message(f"⏱️ **Limit Set:** {user.mention} can now only post once every **{hours} hours**.", ephemeral=True)
 
     @limit_group.command(name="remove", description="Remove posting limit for a user")
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_owner_or_admin()
     async def limit_remove(self, interaction: discord.Interaction, user: discord.Member):
         async with database.get_db() as db:
             await db.execute("UPDATE Users SET post_limit_hours = NULL WHERE user_id = ?", (user.id,))
@@ -448,7 +464,7 @@ class Reputation(commands.Cog):
 
     @setup.error
     async def setup_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingPermissions):
+        if isinstance(error, app_commands.CheckFailure): # Catch our custom check failure
             await interaction.response.send_message("⛔ Administrators only.", ephemeral=True)
 
 async def setup(bot):
