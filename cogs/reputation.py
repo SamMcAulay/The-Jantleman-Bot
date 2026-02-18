@@ -218,10 +218,18 @@ class Reputation(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=False)
 
+        async def send_error(msg):
+            await interaction.edit_original_response(content=msg)
+            await asyncio.sleep(10)
+            try:
+                await interaction.delete_original_response()
+            except:
+                pass
+
         if user.id == interaction.user.id:
-            return await interaction.followup.send("❌ You cannot review yourself.", ephemeral=True)
+            return await send_error("❌ You cannot review yourself.")
         if not (1 <= stars <= 5):
-            return await interaction.followup.send("❌ Stars must be between 1 and 5.", ephemeral=True)
+            return await send_error("❌ Stars must be between 1 and 5.")
 
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
@@ -229,7 +237,7 @@ class Reputation(commands.Cog):
             async with db.execute("SELECT review_banned FROM Users WHERE user_id = ?", (interaction.user.id,)) as cursor:
                 author_data = await cursor.fetchone()
                 if author_data and author_data['review_banned']:
-                    return await interaction.followup.send("⛔ **You are blocked from leaving reviews.**", ephemeral=True)
+                    return await send_error("⛔ **You are blocked from leaving reviews.**")
 
             async with db.execute("SELECT proof_req FROM Settings WHERE guild_id = ?", (interaction.guild_id,)) as cursor:
                 setting = await cursor.fetchone()
@@ -243,23 +251,18 @@ class Reputation(commands.Cog):
                 if not any(rid in user_role_ids for rid in valid_roles):
                     display_roles = valid_roles[:3]
                     allowed_mentions = " ".join([f"<@&{rid}>" for rid in display_roles])
-                    return await interaction.followup.send(
-                        f"⛔ You need one of these roles to review: {allowed_mentions}",
-                        ephemeral=True,
-                    )
+                    return await send_error(f"⛔ You need one of these roles to review: {allowed_mentions}")
 
             if proof_req == "required" and not proof:
-                return await interaction.followup.send(
-                    "📸 **Proof Required:** This server requires a screenshot attachment for all reviews.\n\nPlease run the command again and attach an image in the `proof` field.",
-                    ephemeral=True,
+                return await send_error(
+                    "📸 **Proof Required**\nThis server requires a screenshot for all reviews.\n\n*Please run the command again with an image attached.*"
                 )
+            
             if proof_req == "off" and proof:
-                return await interaction.followup.send(
-                    "❌ **Proof Disabled:** This server has disabled screenshot attachments.",
-                    ephemeral=True
-                )
+                return await send_error("❌ **Proof Disabled:** This server has disabled screenshot attachments.")
+
             if proof and not proof.content_type.startswith("image/"):
-                return await interaction.followup.send("❌ Proof must be an image file.", ephemeral=True)
+                return await send_error("❌ Proof must be an image file.")
 
             async with db.execute(
                 "SELECT timestamp FROM Reviews WHERE author_id = ? AND target_id = ? ORDER BY timestamp DESC LIMIT 1",
@@ -267,10 +270,7 @@ class Reputation(commands.Cog):
             ) as cursor:
                 last = await cursor.fetchone()
                 if last and datetime.now() - datetime.strptime(last["timestamp"], "%Y-%m-%d %H:%M:%S") < timedelta(hours=24):
-                    return await interaction.followup.send(
-                        "⏳ You can only review the same person once every 24 hours.",
-                        ephemeral=True,
-                    )
+                    return await send_error("⏳ You can only review the same person once every 24 hours.")
 
             stats = await self.get_user_stats(interaction.user.id)
             weight = 1
@@ -301,9 +301,8 @@ class Reputation(commands.Cog):
         if proof:
             embed.set_image(url=proof.url)
         
-        await interaction.followup.send(f"{user.mention} received a new review!", embed=embed)
-
-    # --- REPUTATION CARD ---
+        await interaction.edit_original_response(content=f"{user.mention} received a new review!", embed=embed)    # --- REPUTATION CARD ---
+    
     @app_commands.command(name="rep", description="View a member's reputation card.")
     async def rep(self, interaction: discord.Interaction, user: discord.Member):
         async with database.get_db() as db:
