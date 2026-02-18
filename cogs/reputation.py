@@ -5,7 +5,6 @@ import database
 import aiosqlite
 from datetime import datetime, timedelta
 
-
 class Reputation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -32,6 +31,20 @@ class Reputation(commands.Cog):
                 "SELECT total_reviews FROM Users WHERE user_id = ?", (user_id,)
             ) as cursor:
                 return await cursor.fetchone()
+
+    async def check_staff_perms(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.guild_permissions.administrator:
+            return True
+            
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'audit'", (interaction.guild_id,)) as cursor:
+                valid_roles = [row['role_id'] for row in await cursor.fetchall()]
+        
+        if valid_roles:
+            user_roles = [r.id for r in interaction.user.roles]
+            return any(rid in user_roles for rid in valid_roles)
+        return False
 
     @app_commands.command(name="setup", description="Configure server rules and roles")
     @app_commands.checks.has_permissions(administrator=True)
@@ -159,6 +172,61 @@ class Reputation(commands.Cog):
             f"🗑️ Stopped monitoring: {forum.mention}", ephemeral=True
         )
 
+    review_group = app_commands.Group(name="review", description="Manage reviews and review permissions")
+
+    @review_group.command(name="remove", description="Delete a specific review by ID (Staff Only)")
+    async def review_remove(self, interaction: discord.Interaction, review_id: int):
+        if not await self.check_staff_perms(interaction):
+            return await interaction.response.send_message("⛔ Access Denied: Staff only.", ephemeral=True)
+
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            
+            async with db.execute("SELECT target_id, stars FROM Reviews WHERE review_id = ?", (review_id,)) as cursor:
+                review = await cursor.fetchone()
+            
+            if not review:
+                return await interaction.response.send_message(f"❌ Review ID `#{review_id}` not found.", ephemeral=True)
+
+            target_id = review['target_id']
+            stars_to_remove = review['stars']
+
+            await db.execute("DELETE FROM Reviews WHERE review_id = ?", (review_id,))
+
+            await db.execute("""
+                UPDATE Users 
+                SET total_stars = MAX(0, total_stars - ?), 
+                    total_reviews = MAX(0, total_reviews - 1) 
+                WHERE user_id = ?
+            """, (stars_to_remove, target_id))
+            
+            await db.commit()
+
+        await interaction.response.send_message(f"🗑️ **Deleted Review #{review_id}** and updated reputation stats.", ephemeral=True)
+
+    @review_group.command(name="block", description="Block a user from leaving reviews (Staff Only)")
+    async def review_block(self, interaction: discord.Interaction, user: discord.Member):
+        if not await self.check_staff_perms(interaction):
+            return await interaction.response.send_message("⛔ Access Denied: Staff only.", ephemeral=True)
+
+        async with database.get_db() as db:
+            await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,))
+            await db.execute("UPDATE Users SET review_banned = 1 WHERE user_id = ?", (user.id,))
+            await db.commit()
+        
+        await interaction.response.send_message(f"🚫 **Blocked:** {user.mention} can no longer use `/vouch`.", ephemeral=True)
+
+    @review_group.command(name="unblock", description="Allow a user to leave reviews again (Staff Only)")
+    async def review_unblock(self, interaction: discord.Interaction, user: discord.Member):
+        if not await self.check_staff_perms(interaction):
+            return await interaction.response.send_message("⛔ Access Denied: Staff only.", ephemeral=True)
+
+        async with database.get_db() as db:
+            await db.execute("UPDATE Users SET review_banned = 0 WHERE user_id = ?", (user.id,))
+            await db.commit()
+
+        await interaction.response.send_message(f"✅ **Unblocked:** {user.mention} can now use `/vouch`.", ephemeral=True)
+
     @app_commands.command(name="vouch", description="Review a community member")
     @app_commands.describe(
         proof="(Optional) Screenshot proof. Requirement depends on server settings."
@@ -182,6 +250,11 @@ class Reputation(commands.Cog):
 
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
+
+            async with db.execute("SELECT review_banned FROM Users WHERE user_id = ?", (interaction.user.id,)) as cursor:
+                author_data = await cursor.fetchone()
+                if author_data and author_data['review_banned']:
+                    return await interaction.response.send_message("⛔ **You are blocked from leaving reviews.**", ephemeral=True)
 
             async with db.execute(
                 "SELECT proof_req FROM Settings WHERE guild_id = ?",
@@ -324,23 +397,7 @@ class Reputation(commands.Cog):
 
     @app_commands.command(name="audit", description="🛡️ View proof logs (Staff Only)")
     async def audit(self, interaction: discord.Interaction, user: discord.Member):
-        is_admin = interaction.user.guild_permissions.administrator
-        has_role = False
-
-        async with database.get_db() as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'audit'",
-                (interaction.guild_id,),
-            ) as cursor:
-                valid_roles = [row["role_id"] for row in await cursor.fetchall()]
-
-        if valid_roles:
-            user_role_ids = [r.id for r in interaction.user.roles]
-            if any(rid in user_role_ids for rid in valid_roles):
-                has_role = True
-
-        if not is_admin and not has_role:
+        if not await self.check_staff_perms(interaction):
             return await interaction.response.send_message(
                 "⛔ Access Denied.", ephemeral=True
             )
@@ -348,7 +405,7 @@ class Reputation(commands.Cog):
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT stars, comment, proof_url, author_id, timestamp FROM Reviews WHERE target_id = ? ORDER BY timestamp DESC LIMIT 10",
+                "SELECT review_id, stars, comment, proof_url, author_id, timestamp FROM Reviews WHERE target_id = ? ORDER BY timestamp DESC LIMIT 10",
                 (user.id,),
             ) as cursor:
                 reviews = await cursor.fetchall()
@@ -375,7 +432,7 @@ class Reputation(commands.Cog):
             )
 
             embed.add_field(
-                name=f"{r['timestamp']} ({r['stars']}⭐)",
+                name=f"ID: #{r['review_id']} • {r['timestamp']} ({r['stars']}⭐)",
                 value=f"**From:** {name}\n**Note:** {r['comment']}\n{proof_display}",
                 inline=False,
             )
