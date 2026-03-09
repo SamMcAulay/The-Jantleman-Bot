@@ -44,6 +44,15 @@ async def init_db():
             role_type TEXT,
             PRIMARY KEY (guild_id, role_id, role_type)
         )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS AuditLog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            guild_id INTEGER DEFAULT NULL,
+            target_id INTEGER DEFAULT NULL,
+            details TEXT DEFAULT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
 
         await db.commit()
     logging.info(f"Database initialized at {DB_PATH}")
@@ -51,3 +60,12 @@ async def init_db():
 
 def get_db():
     return aiosqlite.connect(DB_PATH)
+
+
+async def log_admin_action(admin_id: int, action: str, guild_id: int = None, target_id: int = None, details: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO AuditLog (admin_id, action, guild_id, target_id, details) VALUES (?, ?, ?, ?, ?)",
+            (admin_id, action, guild_id, target_id, details),
+        )
+        await db.commit()

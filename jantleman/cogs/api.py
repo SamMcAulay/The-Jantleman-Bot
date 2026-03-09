@@ -18,12 +18,13 @@ def _cors(request) -> dict:
     }
 
 
-def _issue_token(user_id: int, guilds: list[int]) -> str:
+def _issue_token(user_id: int, guilds: list[int], is_admin: bool = False) -> str:
     secret = os.getenv("DASHBOARD_SECRET_KEY", "changeme")
     payload = {
         "user_id": user_id,
         "guilds": guilds,
-        "exp": int(time.time()) + 3600 * 8,  # 8-hour session
+        "is_admin": is_admin,
+        "exp": int(time.time()) + 3600 * 8,
     }
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -43,12 +44,30 @@ def _require_auth(request: web.Request, guild_id: int) -> dict:
         raise web.HTTPUnauthorized(reason="Token expired")
     except jwt.InvalidTokenError:
         raise web.HTTPUnauthorized(reason="Invalid token")
+    # Admins bypass guild membership check
+    if payload.get("is_admin"):
+        return payload
     if guild_id not in payload.get("guilds", []):
         raise web.HTTPForbidden(reason="No access to this guild")
     return payload
 
 
-def _get_guilds_from_token(request: web.Request) -> dict:
+def _require_admin(request: web.Request) -> dict:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise web.HTTPUnauthorized(reason="Missing token")
+    try:
+        payload = _decode_token(auth[7:])
+    except jwt.ExpiredSignatureError:
+        raise web.HTTPUnauthorized(reason="Token expired")
+    except jwt.InvalidTokenError:
+        raise web.HTTPUnauthorized(reason="Invalid token")
+    if not payload.get("is_admin"):
+        raise web.HTTPForbidden(reason="Admin access required")
+    return payload
+
+
+def _get_token_payload(request: web.Request) -> dict:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise web.HTTPUnauthorized(reason="Missing token")
@@ -64,6 +83,7 @@ class Api(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.runner = None
+        self.start_time = None
 
     async def cog_load(self):
         app = web.Application()
@@ -75,7 +95,7 @@ class Api(commands.Cog):
         app.router.add_get("/auth/login", self.handle_login)
         app.router.add_get("/auth/callback", self.handle_callback)
 
-        # Preflight (CORS)
+        # CORS preflight
         for path in [
             "/api/guilds",
             "/api/settings/{guild_id}",
@@ -85,10 +105,16 @@ class Api(commands.Cog):
             "/api/blacklist/{guild_id}/{user_id}",
             "/api/limits/{guild_id}",
             "/api/limits/{guild_id}/{user_id}",
+            "/admin/guilds",
+            "/admin/stats",
+            "/admin/guild/{guild_id}/users",
+            "/admin/guild/{guild_id}/leave",
+            "/admin/user/{user_id}",
+            "/admin/audit-log",
         ]:
             app.router.add_route("OPTIONS", path, self.handle_preflight)
 
-        # Dashboard API
+        # Dashboard API (requires guild membership or admin)
         app.router.add_get("/api/guilds", self.handle_get_guilds)
         app.router.add_get("/api/settings/{guild_id}", self.handle_get_settings)
         app.router.add_post("/api/settings/{guild_id}", self.handle_post_settings)
@@ -102,6 +128,14 @@ class Api(commands.Cog):
         app.router.add_post("/api/limits/{guild_id}", self.handle_set_limit)
         app.router.add_delete("/api/limits/{guild_id}/{user_id}", self.handle_remove_limit)
 
+        # Admin API (requires is_admin claim)
+        app.router.add_get("/admin/guilds", self.handle_admin_guilds)
+        app.router.add_get("/admin/stats", self.handle_admin_stats)
+        app.router.add_get("/admin/guild/{guild_id}/users", self.handle_admin_guild_users)
+        app.router.add_post("/admin/guild/{guild_id}/leave", self.handle_admin_leave_guild)
+        app.router.add_get("/admin/user/{user_id}", self.handle_admin_user_lookup)
+        app.router.add_get("/admin/audit-log", self.handle_admin_audit_log)
+
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         port = int(os.getenv("PORT", 8080))
@@ -112,6 +146,11 @@ class Api(commands.Cog):
     async def cog_unload(self):
         if self.runner:
             await self.runner.cleanup()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if self.start_time is None:
+            self.start_time = time.time()
 
     # ── Public ─────────────────────────────────────────────────────────────────
 
@@ -179,13 +218,20 @@ class Api(commands.Cog):
             if has_perm and int(g["id"]) in bot_guild_ids:
                 allowed_guilds.append(int(g["id"]))
 
-        token = _issue_token(user_id, allowed_guilds)
+        admin_ids = {
+            int(x.strip())
+            for x in os.getenv("ADMIN_USER_IDS", "").split(",")
+            if x.strip().isdigit()
+        }
+        is_admin = user_id in admin_ids
+
+        token = _issue_token(user_id, allowed_guilds, is_admin=is_admin)
         raise web.HTTPFound(location=f"{dashboard_url}#token={token}")
 
     # ── Guilds ────────────────────────────────────────────────────────────────
 
     async def handle_get_guilds(self, request: web.Request):
-        payload = _get_guilds_from_token(request)
+        payload = _get_token_payload(request)
         guild_ids = payload.get("guilds", [])
         guilds = []
         for gid in guild_ids:
@@ -222,7 +268,7 @@ class Api(commands.Cog):
 
     async def handle_post_settings(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
-        _require_auth(request, guild_id)
+        payload = _require_auth(request, guild_id)
 
         try:
             body = await request.json()
@@ -246,6 +292,7 @@ class Api(commands.Cog):
             )
             await db.commit()
 
+        await database.log_admin_action(payload["user_id"], "update_settings", guild_id=guild_id)
         return web.json_response({"ok": True}, headers=_cors(request))
 
     # ── Monitored Channels ─────────────────────────────────────────────────────
@@ -273,7 +320,7 @@ class Api(commands.Cog):
 
     async def handle_add_channel(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
-        _require_auth(request, guild_id)
+        payload = _require_auth(request, guild_id)
 
         try:
             body = await request.json()
@@ -297,11 +344,12 @@ class Api(commands.Cog):
             )
             await db.commit()
 
+        await database.log_admin_action(payload["user_id"], "add_channel", guild_id=guild_id, target_id=channel_id)
         return web.json_response({"ok": True}, status=201, headers=_cors(request))
 
     async def handle_remove_channel(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
-        _require_auth(request, guild_id)
+        payload = _require_auth(request, guild_id)
         channel_id = int(request.match_info["channel_id"])
 
         import database
@@ -312,6 +360,7 @@ class Api(commands.Cog):
             )
             await db.commit()
 
+        await database.log_admin_action(payload["user_id"], "remove_channel", guild_id=guild_id, target_id=channel_id)
         return web.json_response({"ok": True}, headers=_cors(request))
 
     # ── Blacklist ──────────────────────────────────────────────────────────────
@@ -331,12 +380,10 @@ class Api(commands.Cog):
                 rows = await cursor.fetchall()
 
         result = []
+        guild = self.bot.get_guild(guild_id)
         for r in rows:
             uid = r["user_id"]
-            member = None
-            guild = self.bot.get_guild(guild_id)
-            if guild:
-                member = guild.get_member(uid)
+            member = guild.get_member(uid) if guild else None
             result.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else str(uid),
@@ -346,7 +393,7 @@ class Api(commands.Cog):
 
     async def handle_add_blacklist(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
-        _require_auth(request, guild_id)
+        payload = _require_auth(request, guild_id)
 
         try:
             body = await request.json()
@@ -371,11 +418,12 @@ class Api(commands.Cog):
             )
             await db.commit()
 
+        await database.log_admin_action(payload["user_id"], "blacklist_add", guild_id=guild_id, target_id=user_id)
         return web.json_response({"ok": True}, status=201, headers=_cors(request))
 
     async def handle_remove_blacklist(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
-        _require_auth(request, guild_id)
+        payload = _require_auth(request, guild_id)
         user_id = int(request.match_info["user_id"])
 
         import database
@@ -385,6 +433,7 @@ class Api(commands.Cog):
             )
             await db.commit()
 
+        await database.log_admin_action(payload["user_id"], "blacklist_remove", guild_id=guild_id, target_id=user_id)
         return web.json_response({"ok": True}, headers=_cors(request))
 
     # ── Posting Limits ─────────────────────────────────────────────────────────
@@ -418,7 +467,7 @@ class Api(commands.Cog):
 
     async def handle_set_limit(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
-        _require_auth(request, guild_id)
+        payload = _require_auth(request, guild_id)
 
         try:
             body = await request.json()
@@ -447,11 +496,12 @@ class Api(commands.Cog):
             )
             await db.commit()
 
+        await database.log_admin_action(payload["user_id"], "limit_set", guild_id=guild_id, target_id=user_id, details=f"{hours}h")
         return web.json_response({"ok": True}, status=201, headers=_cors(request))
 
     async def handle_remove_limit(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
-        _require_auth(request, guild_id)
+        payload = _require_auth(request, guild_id)
         user_id = int(request.match_info["user_id"])
 
         import database
@@ -461,7 +511,232 @@ class Api(commands.Cog):
             )
             await db.commit()
 
+        await database.log_admin_action(payload["user_id"], "limit_remove", guild_id=guild_id, target_id=user_id)
         return web.json_response({"ok": True}, headers=_cors(request))
+
+    # ── Admin: All Guilds ──────────────────────────────────────────────────────
+
+    async def handle_admin_guilds(self, request: web.Request):
+        _require_admin(request)
+        import database
+        import aiosqlite
+
+        guilds = []
+        for g in self.bot.guilds:
+            async with database.get_db() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT COUNT(*) as cnt FROM MonitoredChannels WHERE guild_id = ?", (g.id,)
+                ) as cursor:
+                    ch_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT COUNT(*) as cnt FROM Users WHERE total_reviews > 0"
+                ) as cursor:
+                    users_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT track_identity, proof_req FROM Settings WHERE guild_id = ?", (g.id,)
+                ) as cursor:
+                    settings_row = await cursor.fetchone()
+
+            guilds.append({
+                "id": str(g.id),
+                "name": g.name,
+                "icon": str(g.icon) if g.icon else None,
+                "member_count": g.member_count,
+                "monitored_channels": ch_row["cnt"] if ch_row else 0,
+                "tracked_users": users_row["cnt"] if users_row else 0,
+                "track_identity": bool(settings_row["track_identity"]) if settings_row else True,
+                "proof_req": settings_row["proof_req"] if settings_row else "required",
+            })
+
+        guilds.sort(key=lambda x: x["name"].lower())
+        return web.json_response({"guilds": guilds}, headers=_cors(request))
+
+    # ── Admin: Stats ───────────────────────────────────────────────────────────
+
+    async def handle_admin_stats(self, request: web.Request):
+        _require_admin(request)
+        import database
+        import aiosqlite
+
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT COUNT(*) as cnt FROM Users WHERE total_reviews > 0") as cursor:
+                users_row = await cursor.fetchone()
+            async with db.execute("SELECT COUNT(*) as cnt FROM Reviews") as cursor:
+                reviews_row = await cursor.fetchone()
+            async with db.execute("SELECT COUNT(*) as cnt FROM Users WHERE is_blacklisted = 1") as cursor:
+                bl_row = await cursor.fetchone()
+            async with db.execute("SELECT COUNT(*) as cnt FROM Watchlist") as cursor:
+                wl_row = await cursor.fetchone()
+
+        uptime = int(time.time() - self.start_time) if self.start_time else 0
+        return web.json_response({
+            "uptime_seconds": uptime,
+            "guild_count": len(self.bot.guilds),
+            "latency_ms": round(self.bot.latency * 1000, 1),
+            "tracked_users": users_row["cnt"] if users_row else 0,
+            "total_reviews": reviews_row["cnt"] if reviews_row else 0,
+            "blacklisted_users": bl_row["cnt"] if bl_row else 0,
+            "watchlist_entries": wl_row["cnt"] if wl_row else 0,
+        }, headers=_cors(request))
+
+    # ── Admin: Guild Users ─────────────────────────────────────────────────────
+
+    async def handle_admin_guild_users(self, request: web.Request):
+        _require_admin(request)
+        guild_id = int(request.match_info["guild_id"])
+        import database
+        import aiosqlite
+
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT u.user_id, u.total_stars, u.total_reviews, u.is_blacklisted, u.post_limit_hours
+                   FROM Users u
+                   WHERE u.total_reviews > 0
+                   ORDER BY u.total_reviews DESC
+                   LIMIT 50"""
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        guild = self.bot.get_guild(guild_id)
+        users = []
+        for r in rows:
+            uid = r["user_id"]
+            member = guild.get_member(uid) if guild else None
+            avg = round(r["total_stars"] / r["total_reviews"], 1) if r["total_reviews"] > 0 else 0
+            users.append({
+                "user_id": str(uid),
+                "username": member.display_name if member else str(uid),
+                "avatar": str(member.display_avatar.url) if member else None,
+                "total_reviews": r["total_reviews"],
+                "avg_rating": avg,
+                "is_blacklisted": bool(r["is_blacklisted"]),
+                "post_limit_hours": r["post_limit_hours"],
+            })
+
+        return web.json_response({"users": users}, headers=_cors(request))
+
+    # ── Admin: User Lookup ─────────────────────────────────────────────────────
+
+    async def handle_admin_user_lookup(self, request: web.Request):
+        _require_admin(request)
+        user_id = int(request.match_info["user_id"])
+        import database
+        import aiosqlite
+
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM Users WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                user_row = await cursor.fetchone()
+
+            async with db.execute(
+                """SELECT r.stars, r.comment, r.proof_url, r.author_id, r.timestamp
+                   FROM Reviews r WHERE r.target_id = ?
+                   ORDER BY r.timestamp DESC LIMIT 20""",
+                (user_id,)
+            ) as cursor:
+                reviews = await cursor.fetchall()
+
+            async with db.execute(
+                """SELECT old_name, new_name, timestamp FROM NameHistory
+                   WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20""",
+                (user_id,)
+            ) as cursor:
+                name_history = await cursor.fetchall()
+
+        # Try to get Discord user info
+        user_info = {"id": str(user_id), "name": str(user_id), "avatar": None}
+        try:
+            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+            if user:
+                user_info = {
+                    "id": str(user.id),
+                    "name": user.name,
+                    "display_name": user.display_name,
+                    "avatar": str(user.display_avatar.url) if user.display_avatar else None,
+                }
+        except Exception:
+            pass
+
+        avg = 0
+        if user_row and user_row["total_reviews"] > 0:
+            avg = round(user_row["total_stars"] / user_row["total_reviews"], 1)
+
+        return web.json_response({
+            "user": user_info,
+            "stats": {
+                "total_reviews": user_row["total_reviews"] if user_row else 0,
+                "avg_rating": avg,
+                "is_blacklisted": bool(user_row["is_blacklisted"]) if user_row else False,
+                "post_limit_hours": user_row["post_limit_hours"] if user_row else None,
+            },
+            "reviews": [
+                {
+                    "stars": r["stars"],
+                    "comment": r["comment"],
+                    "proof_url": r["proof_url"],
+                    "author_id": str(r["author_id"]),
+                    "timestamp": r["timestamp"],
+                }
+                for r in reviews
+            ],
+            "name_history": [
+                {
+                    "old_name": r["old_name"],
+                    "new_name": r["new_name"],
+                    "timestamp": r["timestamp"],
+                }
+                for r in name_history
+            ],
+        }, headers=_cors(request))
+
+    # ── Admin: Leave Guild ─────────────────────────────────────────────────────
+
+    async def handle_admin_leave_guild(self, request: web.Request):
+        payload = _require_admin(request)
+        guild_id = int(request.match_info["guild_id"])
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            raise web.HTTPNotFound(reason="Guild not found")
+        import database
+        await database.log_admin_action(payload["user_id"], "leave_guild", guild_id=guild_id, details=guild.name)
+        await guild.leave()
+        return web.json_response({"ok": True}, headers=_cors(request))
+
+    # ── Admin: Audit Log ───────────────────────────────────────────────────────
+
+    async def handle_admin_audit_log(self, request: web.Request):
+        _require_admin(request)
+        import database
+        import aiosqlite
+
+        limit = min(int(request.rel_url.query.get("limit", 100)), 500)
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT admin_id, action, guild_id, target_id, details, timestamp FROM AuditLog ORDER BY timestamp DESC LIMIT ?",
+                (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        entries = []
+        for r in rows:
+            admin = self.bot.get_user(r["admin_id"])
+            entries.append({
+                "admin_id": str(r["admin_id"]),
+                "admin_name": admin.name if admin else str(r["admin_id"]),
+                "action": r["action"],
+                "guild_id": str(r["guild_id"]) if r["guild_id"] else None,
+                "target_id": str(r["target_id"]) if r["target_id"] else None,
+                "details": r["details"],
+                "timestamp": r["timestamp"],
+            })
+
+        return web.json_response({"entries": entries}, headers=_cors(request))
 
 
 async def setup(bot):
