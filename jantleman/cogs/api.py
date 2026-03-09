@@ -107,6 +107,8 @@ class Api(commands.Cog):
             "/api/limits/{guild_id}/{user_id}",
             "/api/members/{guild_id}",
             "/api/reviews/{guild_id}/{user_id}",
+            "/api/reviewbans/{guild_id}",
+            "/api/reviewbans/{guild_id}/{user_id}",
             "/admin/guilds",
             "/admin/stats",
             "/admin/guild/{guild_id}/users",
@@ -131,6 +133,9 @@ class Api(commands.Cog):
         app.router.add_delete("/api/limits/{guild_id}/{user_id}", self.handle_remove_limit)
         app.router.add_get("/api/members/{guild_id}", self.handle_get_members)
         app.router.add_get("/api/reviews/{guild_id}/{user_id}", self.handle_get_user_reviews)
+        app.router.add_get("/api/reviewbans/{guild_id}", self.handle_get_reviewbans)
+        app.router.add_post("/api/reviewbans/{guild_id}", self.handle_add_reviewban)
+        app.router.add_delete("/api/reviewbans/{guild_id}/{user_id}", self.handle_remove_reviewban)
 
         # Admin API (requires is_admin claim)
         app.router.add_get("/admin/guilds", self.handle_admin_guilds)
@@ -260,13 +265,19 @@ class Api(commands.Cog):
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT track_identity, proof_req FROM Settings WHERE guild_id = ?", (guild_id,)
+                "SELECT * FROM Settings WHERE guild_id = ?", (guild_id,)
             ) as cursor:
                 row = await cursor.fetchone()
 
         data = {
-            "track_identity": bool(row["track_identity"]) if row else True,
-            "proof_req": row["proof_req"] if row else "required",
+            "track_identity":           bool(row["track_identity"])        if row else True,
+            "proof_req":                row["proof_req"]                   if row else "required",
+            "verified_role_id":         str(row["verified_role_id"])       if row and row["verified_role_id"] else "",
+            "audit_role_id":            str(row["audit_role_id"])          if row and row["audit_role_id"] else "",
+            "min_reviews":              row["min_reviews"]                 if row and row["min_reviews"] is not None else 1,
+            "global_post_limit_hours":  row["global_post_limit_hours"]     if row else None,
+            "auto_delete_new":          bool(row["auto_delete_new"])       if row else False,
+            "alert_channel_id":         str(row["alert_channel_id"])       if row and row["alert_channel_id"] else "",
         }
         return web.json_response(data, headers=_cors(request))
 
@@ -279,20 +290,45 @@ class Api(commands.Cog):
         except Exception:
             raise web.HTTPBadRequest(reason="Invalid JSON")
 
-        track_identity = bool(body.get("track_identity", True))
-        proof_req = str(body.get("proof_req", "required"))
+        track_identity          = bool(body.get("track_identity", True))
+        proof_req               = str(body.get("proof_req", "required"))
+        auto_delete_new         = bool(body.get("auto_delete_new", False))
+        min_reviews             = int(body.get("min_reviews", 1))
+        global_post_limit_hours = body.get("global_post_limit_hours")
+        verified_role_id        = body.get("verified_role_id") or None
+        audit_role_id           = body.get("audit_role_id") or None
+        alert_channel_id        = body.get("alert_channel_id") or None
+
         if proof_req not in ("required", "optional", "off"):
             raise web.HTTPBadRequest(reason="Invalid proof_req value")
+        if min_reviews < 0:
+            raise web.HTTPBadRequest(reason="min_reviews must be >= 0")
+
+        def to_int_or_none(v):
+            try:
+                return int(v) if v else None
+            except (TypeError, ValueError):
+                return None
 
         import database
         async with database.get_db() as db:
             await db.execute(
-                """INSERT INTO Settings (guild_id, track_identity, proof_req)
-                   VALUES (?, ?, ?)
+                """INSERT INTO Settings (guild_id, track_identity, proof_req, verified_role_id,
+                       audit_role_id, min_reviews, global_post_limit_hours, auto_delete_new, alert_channel_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(guild_id) DO UPDATE SET
-                       track_identity = excluded.track_identity,
-                       proof_req = excluded.proof_req""",
-                (guild_id, track_identity, proof_req),
+                       track_identity          = excluded.track_identity,
+                       proof_req               = excluded.proof_req,
+                       verified_role_id        = excluded.verified_role_id,
+                       audit_role_id           = excluded.audit_role_id,
+                       min_reviews             = excluded.min_reviews,
+                       global_post_limit_hours = excluded.global_post_limit_hours,
+                       auto_delete_new         = excluded.auto_delete_new,
+                       alert_channel_id        = excluded.alert_channel_id""",
+                (guild_id, track_identity, proof_req,
+                 to_int_or_none(verified_role_id), to_int_or_none(audit_role_id),
+                 min_reviews, to_int_or_none(global_post_limit_hours),
+                 auto_delete_new, to_int_or_none(alert_channel_id)),
             )
             await db.commit()
 
@@ -585,6 +621,68 @@ class Api(commands.Cog):
             })
 
         return web.json_response(reviews, headers=_cors(request))
+
+    # ── Review Bans ────────────────────────────────────────────────────────────
+
+    async def handle_get_reviewbans(self, request: web.Request):
+        guild_id = int(request.match_info["guild_id"])
+        _require_auth(request, guild_id)
+        import database, aiosqlite
+
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT user_id FROM Users WHERE review_banned = 1"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        guild = self.bot.get_guild(guild_id)
+        result = []
+        for r in rows:
+            uid = r["user_id"]
+            member = guild.get_member(uid) if guild else None
+            result.append({
+                "user_id": str(uid),
+                "username": member.display_name if member else str(uid),
+            })
+        return web.json_response(result, headers=_cors(request))
+
+    async def handle_add_reviewban(self, request: web.Request):
+        guild_id = int(request.match_info["guild_id"])
+        payload = _require_auth(request, guild_id)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(reason="Invalid JSON")
+        user_id = body.get("user_id")
+        if not user_id:
+            raise web.HTTPBadRequest(reason="user_id required")
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(reason="Invalid user_id")
+
+        import database
+        async with database.get_db() as db:
+            await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user_id,))
+            await db.execute("UPDATE Users SET review_banned = 1 WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+        await database.log_admin_action(payload["user_id"], "reviewban_add", guild_id=guild_id, target_id=user_id)
+        return web.json_response({"ok": True}, status=201, headers=_cors(request))
+
+    async def handle_remove_reviewban(self, request: web.Request):
+        guild_id = int(request.match_info["guild_id"])
+        payload = _require_auth(request, guild_id)
+        user_id = int(request.match_info["user_id"])
+
+        import database
+        async with database.get_db() as db:
+            await db.execute("UPDATE Users SET review_banned = 0 WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+        await database.log_admin_action(payload["user_id"], "reviewban_remove", guild_id=guild_id, target_id=user_id)
+        return web.json_response({"ok": True}, headers=_cors(request))
 
     # ── Admin: All Guilds ──────────────────────────────────────────────────────
 

@@ -33,11 +33,18 @@ async def init_db():
             channel_name TEXT DEFAULT NULL,
             PRIMARY KEY (guild_id, channel_id)
         )""")
-        # Safe migration: add channel_name column if it doesn't exist yet
-        try:
-            await db.execute("ALTER TABLE MonitoredChannels ADD COLUMN channel_name TEXT DEFAULT NULL")
-        except Exception:
-            pass
+        # Safe migrations
+        for migration in [
+            "ALTER TABLE MonitoredChannels ADD COLUMN channel_name TEXT DEFAULT NULL",
+            "ALTER TABLE Settings ADD COLUMN min_reviews INTEGER DEFAULT 1",
+            "ALTER TABLE Settings ADD COLUMN global_post_limit_hours INTEGER DEFAULT NULL",
+            "ALTER TABLE Settings ADD COLUMN auto_delete_new BOOLEAN DEFAULT 0",
+            "ALTER TABLE Settings ADD COLUMN alert_channel_id INTEGER DEFAULT NULL",
+        ]:
+            try:
+                await db.execute(migration)
+            except Exception:
+                pass
         await db.execute("""CREATE TABLE IF NOT EXISTS GuildRoles (
             guild_id INTEGER,
             role_id INTEGER,

@@ -80,6 +80,18 @@ async def on_thread_create(thread):
     async with database.get_db() as db:
         db.row_factory = aiosqlite.Row
 
+        # Load guild settings first so all checks can use them
+        async with db.execute(
+            "SELECT * FROM Settings WHERE guild_id = ?", (thread.guild.id,)
+        ) as cursor:
+            settings = await cursor.fetchone()
+
+        s_track_identity       = settings["track_identity"]        if settings else True
+        s_min_reviews          = settings["min_reviews"]           if settings and settings["min_reviews"] is not None else 1
+        s_global_limit         = settings["global_post_limit_hours"] if settings else None
+        s_auto_delete_new      = bool(settings["auto_delete_new"]) if settings else False
+        s_alert_channel_id     = settings["alert_channel_id"]      if settings else None
+
         async with db.execute(
             "SELECT * FROM Users WHERE user_id = ?", (owner.id,)
         ) as cursor:
@@ -95,29 +107,42 @@ async def on_thread_create(thread):
                 pass
             return
 
-        if (
-            user_data
-            and user_data["post_limit_hours"]
-            and user_data["last_post_timestamp"]
-        ):
+        # Per-user limit, falling back to server-wide global limit
+        effective_limit = user_data["post_limit_hours"] if user_data else None
+        if effective_limit is None:
+            effective_limit = s_global_limit
+
+        if effective_limit and user_data and user_data["last_post_timestamp"]:
             last_post = datetime.strptime(
                 user_data["last_post_timestamp"], "%Y-%m-%d %H:%M:%S"
             )
             diff = datetime.now() - last_post
-            limit_hours = user_data["post_limit_hours"]
-
-            if diff < timedelta(hours=limit_hours):
+            if diff < timedelta(hours=effective_limit):
                 remaining = int(
-                    (timedelta(hours=limit_hours) - diff).total_seconds() / 60
+                    (timedelta(hours=effective_limit) - diff).total_seconds() / 60
                 )
                 try:
                     await thread.delete()
                     await owner.send(
-                        f"⏱️ **Cooldown Active**\nYou are limited to one post every {limit_hours} hours.\nPlease wait **{remaining} minutes** before posting again."
+                        f"⏱️ **Cooldown Active**\nYou are limited to one post every {effective_limit} hours.\nPlease wait **{remaining} minutes** before posting again."
                     )
                 except:
                     pass
                 return
+
+        # Auto-delete threads from users below the minimum review threshold
+        review_count = user_data["total_reviews"] if user_data else 0
+        if s_auto_delete_new and review_count < s_min_reviews:
+            try:
+                await thread.delete()
+                await owner.send(
+                    f"⛔ **Post Removed**\n"
+                    f"This channel requires at least **{s_min_reviews}** verified review(s) to post.\n"
+                    f"Build your reputation elsewhere first!"
+                )
+            except:
+                pass
+            return
 
         await db.execute(
             "INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (owner.id,)
@@ -128,14 +153,8 @@ async def on_thread_create(thread):
         )
         await db.commit()
 
-        async with db.execute(
-            "SELECT track_identity FROM Settings WHERE guild_id = ?", (thread.guild.id,)
-        ) as cursor:
-            settings = await cursor.fetchone()
-            tracking_enabled = settings["track_identity"] if settings else True
-
         change_count = 0
-        if tracking_enabled:
+        if s_track_identity:
             seven_days_ago = datetime.now() - timedelta(days=7)
             async with db.execute(
                 "SELECT COUNT(*) FROM NameHistory WHERE user_id = ? AND timestamp > ?",
@@ -150,18 +169,18 @@ async def on_thread_create(thread):
     )
     embed.set_thumbnail(url=owner.display_avatar.url)
 
-    if not user_data or user_data["total_reviews"] == 0:
+    if not user_data or review_count < s_min_reviews:
         embed.title = "⚠️ New Member Alert"
         embed.color = 0xFFA500
-        desc = f"**User:** {owner.mention}\nHas **0** recorded reviews."
+        desc = f"**User:** {owner.mention}\nHas **{review_count}** recorded review(s)."
     else:
-        avg = round(user_data["total_stars"] / user_data["total_reviews"], 1)
+        avg = round(user_data["total_stars"] / review_count, 1)
         stars = ("⭐" * int(avg)) + ("☆" * (5 - int(avg)))
         embed.title = "✅ Established Member"
         embed.color = discord.Color.gold()
-        desc = f"**User:** {owner.mention}\n**Rating:** {stars} ({avg}/5)\n**Reviews:** {user_data['total_reviews']}"
+        desc = f"**User:** {owner.mention}\n**Rating:** {stars} ({avg}/5)\n**Reviews:** {review_count}"
 
-    if tracking_enabled and change_count > 0:
+    if s_track_identity and change_count > 0:
         embed.add_field(
             name="⚠️ Identity Alert",
             value=f"Changed name **{change_count} times** in the last 7 days.",
@@ -198,6 +217,18 @@ async def on_thread_create(thread):
     else:
         logging.error(f"❌ TIMEOUT: Gave up on thread {thread.id} after 3 minutes. Upload stuck or abandoned.")
         return
+
+    # Post to alert channel if configured and the embed is a warning/risk
+    if s_alert_channel_id and embed.title and any(w in embed.title for w in ("⚠️", "🛑")):
+        alert_ch = thread.guild.get_channel(s_alert_channel_id)
+        if alert_ch:
+            try:
+                await alert_ch.send(
+                    f"🚨 **Flag in {thread.parent.mention}:** {thread.mention}\n"
+                    f"**User:** {owner.mention} — {embed.title}",
+                )
+            except Exception:
+                pass
 
     content_to_scan = thread.name.lower()
 
