@@ -30,8 +30,14 @@ async def init_db():
         await db.execute("""CREATE TABLE IF NOT EXISTS MonitoredChannels (
             guild_id INTEGER,
             channel_id INTEGER,
+            channel_name TEXT DEFAULT NULL,
             PRIMARY KEY (guild_id, channel_id)
         )""")
+        # Safe migration: add channel_name column if it doesn't exist yet
+        try:
+            await db.execute("ALTER TABLE MonitoredChannels ADD COLUMN channel_name TEXT DEFAULT NULL")
+        except Exception:
+            pass
         await db.execute("""CREATE TABLE IF NOT EXISTS GuildRoles (
             guild_id INTEGER,
             role_id INTEGER,

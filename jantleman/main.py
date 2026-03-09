@@ -20,6 +20,7 @@ class JantlemanBot(commands.Bot):
 
     async def setup_hook(self):
         await database.init_db()
+        await self.load_extension("cogs.api")
         await self.load_extension("cogs.reputation")
         await self.load_extension("cogs.watchlist")
         await self.tree.sync()
