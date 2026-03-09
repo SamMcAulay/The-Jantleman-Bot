@@ -105,6 +105,8 @@ class Api(commands.Cog):
             "/api/blacklist/{guild_id}/{user_id}",
             "/api/limits/{guild_id}",
             "/api/limits/{guild_id}/{user_id}",
+            "/api/members/{guild_id}",
+            "/api/reviews/{guild_id}/{user_id}",
             "/admin/guilds",
             "/admin/stats",
             "/admin/guild/{guild_id}/users",
@@ -127,6 +129,8 @@ class Api(commands.Cog):
         app.router.add_get("/api/limits/{guild_id}", self.handle_get_limits)
         app.router.add_post("/api/limits/{guild_id}", self.handle_set_limit)
         app.router.add_delete("/api/limits/{guild_id}/{user_id}", self.handle_remove_limit)
+        app.router.add_get("/api/members/{guild_id}", self.handle_get_members)
+        app.router.add_get("/api/reviews/{guild_id}/{user_id}", self.handle_get_user_reviews)
 
         # Admin API (requires is_admin claim)
         app.router.add_get("/admin/guilds", self.handle_admin_guilds)
@@ -513,6 +517,74 @@ class Api(commands.Cog):
 
         await database.log_admin_action(payload["user_id"], "limit_remove", guild_id=guild_id, target_id=user_id)
         return web.json_response({"ok": True}, headers=_cors(request))
+
+    # ── Members & Reviews ──────────────────────────────────────────────────────
+
+    async def handle_get_members(self, request: web.Request):
+        guild_id = int(request.match_info["guild_id"])
+        _require_auth(request, guild_id)
+        import database
+        import aiosqlite
+
+        guild = self.bot.get_guild(guild_id)
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT user_id, total_stars, total_reviews, is_blacklisted, post_limit_hours
+                   FROM Users WHERE total_reviews > 0
+                   ORDER BY total_reviews DESC"""
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        members = []
+        for r in rows:
+            uid = r["user_id"]
+            member = guild.get_member(uid) if guild else None
+            avg = round(r["total_stars"] / r["total_reviews"], 1) if r["total_reviews"] > 0 else 0
+            members.append({
+                "user_id": str(uid),
+                "username": member.display_name if member else None,
+                "avatar": str(member.display_avatar.url) if member else None,
+                "total_reviews": r["total_reviews"],
+                "avg_rating": avg,
+                "is_blacklisted": bool(r["is_blacklisted"]),
+                "post_limit_hours": r["post_limit_hours"],
+            })
+
+        return web.json_response(members, headers=_cors(request))
+
+    async def handle_get_user_reviews(self, request: web.Request):
+        guild_id = int(request.match_info["guild_id"])
+        _require_auth(request, guild_id)
+        user_id = int(request.match_info["user_id"])
+        import database
+        import aiosqlite
+
+        guild = self.bot.get_guild(guild_id)
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT stars, comment, proof_url, author_id, timestamp
+                   FROM Reviews WHERE target_id = ?
+                   ORDER BY timestamp DESC""",
+                (user_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        reviews = []
+        for r in rows:
+            aid = r["author_id"]
+            author = guild.get_member(aid) if guild else None
+            reviews.append({
+                "stars": r["stars"],
+                "comment": r["comment"],
+                "proof_url": r["proof_url"],
+                "author_id": str(aid),
+                "author_name": author.display_name if author else str(aid),
+                "timestamp": r["timestamp"],
+            })
+
+        return web.json_response(reviews, headers=_cors(request))
 
     # ── Admin: All Guilds ──────────────────────────────────────────────────────
 
