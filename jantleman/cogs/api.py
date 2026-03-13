@@ -571,7 +571,7 @@ class Api(commands.Cog):
         cdn_urls = [u for u in urls if u and u.startswith("https://cdn.discordapp.com/attachments/")]
         if not cdn_urls:
             return {}
-        token = os.getenv("DISCORD_BOT_TOKEN", "")
+        token = os.getenv("DISCORD_TOKEN", "")
         try:
             async with ClientSession() as session:
                 res = await session.post(
