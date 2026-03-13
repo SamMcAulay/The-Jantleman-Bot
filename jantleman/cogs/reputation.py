@@ -310,7 +310,7 @@ class Reputation(commands.Cog):
                     if stats["total_reviews"] >= 50: weight = 2.0
                     elif stats["total_reviews"] >= 20: weight = 1.5
 
-                proof_link = proof.url if proof else "No Proof Provided"
+                proof_link = proof.url if proof else None
                 weighted_stars = int(stars * weight)
 
                 await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,))

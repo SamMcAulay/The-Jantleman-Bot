@@ -554,6 +554,28 @@ class Api(commands.Cog):
         await database.log_admin_action(payload["user_id"], "limit_remove", guild_id=guild_id, target_id=user_id)
         return web.json_response({"ok": True}, headers=_cors(request))
 
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    async def _refresh_discord_urls(self, urls: list) -> dict:
+        """Refresh expiring Discord CDN attachment URLs via the Discord API."""
+        cdn_urls = [u for u in urls if u and u.startswith("https://cdn.discordapp.com/attachments/")]
+        if not cdn_urls:
+            return {}
+        token = os.getenv("DISCORD_BOT_TOKEN", "")
+        try:
+            async with ClientSession() as session:
+                res = await session.post(
+                    "https://discord.com/api/v10/attachments/refresh-urls",
+                    json={"attachment_urls": cdn_urls},
+                    headers={"Authorization": f"Bot {token}"},
+                )
+                if res.status != 200:
+                    return {}
+                data = await res.json()
+                return {item["original"]: item["refreshed"] for item in data.get("refreshed_urls", [])}
+        except Exception:
+            return {}
+
     # ── Members & Reviews ──────────────────────────────────────────────────────
 
     async def handle_get_members(self, request: web.Request):
@@ -607,14 +629,22 @@ class Api(commands.Cog):
             ) as cursor:
                 rows = await cursor.fetchall()
 
+        raw_proof_urls = [r["proof_url"] for r in rows]
+        url_map = await self._refresh_discord_urls(raw_proof_urls)
+
         reviews = []
         for r in rows:
             aid = r["author_id"]
             author = guild.get_member(aid) if guild else None
+            raw_url = r["proof_url"]
+            proof_url = url_map.get(raw_url, raw_url) if raw_url and raw_url.startswith("https://cdn.discordapp.com/") else raw_url
+            # Normalise old "No Proof Provided" sentinel to null
+            if proof_url and not proof_url.startswith("http"):
+                proof_url = None
             reviews.append({
                 "stars": r["stars"],
                 "comment": r["comment"],
-                "proof_url": r["proof_url"],
+                "proof_url": proof_url,
                 "author_id": str(aid),
                 "author_name": author.display_name if author else str(aid),
                 "timestamp": r["timestamp"],
@@ -836,6 +866,15 @@ class Api(commands.Cog):
         if user_row and user_row["total_reviews"] > 0:
             avg = round(user_row["total_stars"] / user_row["total_reviews"], 1)
 
+        raw_proof_urls = [r["proof_url"] for r in reviews]
+        url_map = await self._refresh_discord_urls(raw_proof_urls)
+
+        def _clean_proof(raw_url):
+            if not raw_url:
+                return None
+            refreshed = url_map.get(raw_url, raw_url) if raw_url.startswith("https://cdn.discordapp.com/") else raw_url
+            return refreshed if refreshed.startswith("http") else None
+
         return web.json_response({
             "user": user_info,
             "stats": {
@@ -848,7 +887,7 @@ class Api(commands.Cog):
                 {
                     "stars": r["stars"],
                     "comment": r["comment"],
-                    "proof_url": r["proof_url"],
+                    "proof_url": _clean_proof(r["proof_url"]),
                     "author_id": str(r["author_id"]),
                     "timestamp": r["timestamp"],
                 }
