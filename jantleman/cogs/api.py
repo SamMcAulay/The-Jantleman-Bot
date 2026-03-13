@@ -7,6 +7,7 @@ from discord.ext import commands
 DISCORD_API = "https://discord.com/api/v10"
 MANAGE_GUILD = 0x20
 ADMINISTRATOR = 0x8
+OWNER_ID = 776355398336249876
 
 
 def _cors(request) -> dict:
@@ -230,7 +231,7 @@ class Api(commands.Cog):
             if has_perm and int(g["id"]) in bot_guild_ids:
                 allowed_guilds.append(int(g["id"]))
 
-        admin_ids = {
+        admin_ids = {OWNER_ID} | {
             int(x.strip())
             for x in os.getenv("ADMIN_USER_IDS", "").split(",")
             if x.strip().isdigit()
@@ -244,6 +245,12 @@ class Api(commands.Cog):
 
     async def handle_get_guilds(self, request: web.Request):
         payload = _get_token_payload(request)
+        if payload.get("is_admin"):
+            guilds = [
+                {"id": str(g.id), "name": g.name, "icon": str(g.icon) if g.icon else None}
+                for g in sorted(self.bot.guilds, key=lambda g: g.name.lower())
+            ]
+            return web.json_response(guilds, headers=_cors(request))
         guild_ids = payload.get("guilds", [])
         guilds = []
         for gid in guild_ids:
