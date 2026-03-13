@@ -115,6 +115,7 @@ class Api(commands.Cog):
             "/admin/guild/{guild_id}/leave",
             "/admin/user/{user_id}",
             "/admin/audit-log",
+            "/admin/reviews/{review_id}",
         ]:
             app.router.add_route("OPTIONS", path, self.handle_preflight)
 
@@ -144,6 +145,8 @@ class Api(commands.Cog):
         app.router.add_post("/admin/guild/{guild_id}/leave", self.handle_admin_leave_guild)
         app.router.add_get("/admin/user/{user_id}", self.handle_admin_user_lookup)
         app.router.add_get("/admin/audit-log", self.handle_admin_audit_log)
+        app.router.add_route("PATCH", "/admin/reviews/{review_id}", self.handle_admin_edit_review)
+        app.router.add_delete("/admin/reviews/{review_id}", self.handle_admin_delete_review)
 
         self.runner = web.AppRunner(app)
         await self.runner.setup()
@@ -626,7 +629,7 @@ class Api(commands.Cog):
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT stars, comment, proof_url, author_id, timestamp
+                """SELECT review_id, stars, comment, proof_url, author_id, timestamp
                    FROM Reviews WHERE target_id = ? AND guild_id = ?
                    ORDER BY timestamp DESC""",
                 (user_id, guild_id)
@@ -646,6 +649,7 @@ class Api(commands.Cog):
             if proof_url and not proof_url.startswith("http"):
                 proof_url = None
             reviews.append({
+                "review_id": r["review_id"],
                 "stars": r["stars"],
                 "comment": r["comment"],
                 "proof_url": proof_url,
@@ -918,6 +922,82 @@ class Api(commands.Cog):
         import database
         await database.log_admin_action(payload["user_id"], "leave_guild", guild_id=guild_id, details=guild.name)
         await guild.leave()
+        return web.json_response({"ok": True}, headers=_cors(request))
+
+    # ── Admin: Edit / Delete Review ────────────────────────────────────────────
+
+    async def handle_admin_edit_review(self, request: web.Request):
+        payload = _require_admin(request)
+        review_id = int(request.match_info["review_id"])
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(reason="Invalid JSON")
+
+        new_stars = body.get("stars")
+        new_comment = body.get("comment")
+
+        if new_stars is not None:
+            new_stars = int(new_stars)
+            if not (1 <= new_stars <= 5):
+                raise web.HTTPBadRequest(reason="stars must be 1–5")
+
+        import database
+        import aiosqlite
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT target_id, stars FROM Reviews WHERE review_id = ?", (review_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if not row:
+                raise web.HTTPNotFound(reason="Review not found")
+
+            if new_stars is not None and new_stars != row["stars"]:
+                delta = new_stars - row["stars"]
+                await db.execute(
+                    "UPDATE Users SET total_stars = MAX(0, total_stars + ?) WHERE user_id = ?",
+                    (delta, row["target_id"]),
+                )
+                await db.execute(
+                    "UPDATE Reviews SET stars = ? WHERE review_id = ?", (new_stars, review_id)
+                )
+            if new_comment is not None:
+                await db.execute(
+                    "UPDATE Reviews SET comment = ? WHERE review_id = ?", (new_comment, review_id)
+                )
+            await db.commit()
+
+        await database.log_admin_action(payload["user_id"], "edit_review", target_id=review_id,
+                                        details=f"stars={new_stars}")
+        return web.json_response({"ok": True}, headers=_cors(request))
+
+    async def handle_admin_delete_review(self, request: web.Request):
+        payload = _require_admin(request)
+        review_id = int(request.match_info["review_id"])
+
+        import database
+        import aiosqlite
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT target_id, stars FROM Reviews WHERE review_id = ?", (review_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if not row:
+                raise web.HTTPNotFound(reason="Review not found")
+
+            await db.execute("DELETE FROM Reviews WHERE review_id = ?", (review_id,))
+            await db.execute(
+                """UPDATE Users SET
+                     total_stars = MAX(0, total_stars - ?),
+                     total_reviews = MAX(0, total_reviews - 1)
+                   WHERE user_id = ?""",
+                (row["stars"], row["target_id"]),
+            )
+            await db.commit()
+
+        await database.log_admin_action(payload["user_id"], "delete_review", target_id=review_id)
         return web.json_response({"ok": True}, headers=_cors(request))
 
     # ── Admin: Audit Log ───────────────────────────────────────────────────────
