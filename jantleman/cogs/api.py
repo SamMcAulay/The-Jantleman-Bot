@@ -595,7 +595,7 @@ class Api(commands.Cog):
                           COUNT(r.review_id) AS guild_reviews,
                           ROUND(AVG(r.stars), 1) AS guild_avg
                    FROM Users u
-                   INNER JOIN Reviews r ON r.target_id = u.user_id AND (r.guild_id = ? OR r.guild_id IS NULL)
+                   INNER JOIN Reviews r ON r.target_id = u.user_id AND r.guild_id = ?
                    GROUP BY u.user_id
                    ORDER BY guild_reviews DESC""",
                 (guild_id,)
@@ -630,7 +630,7 @@ class Api(commands.Cog):
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT review_id, stars, comment, proof_url, author_id, timestamp
-                   FROM Reviews WHERE target_id = ? AND (guild_id = ? OR guild_id IS NULL)
+                   FROM Reviews WHERE target_id = ? AND guild_id = ?
                    ORDER BY timestamp DESC""",
                 (user_id, guild_id)
             ) as cursor:
@@ -804,7 +804,7 @@ class Api(commands.Cog):
                           COUNT(r.review_id) AS total_reviews,
                           ROUND(AVG(r.stars), 1) AS avg_rating
                    FROM Users u
-                   INNER JOIN Reviews r ON r.target_id = u.user_id AND (r.guild_id = ? OR r.guild_id IS NULL)
+                   INNER JOIN Reviews r ON r.target_id = u.user_id AND r.guild_id = ?
                    GROUP BY u.user_id
                    ORDER BY total_reviews DESC
                    LIMIT 50""",
