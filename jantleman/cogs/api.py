@@ -114,6 +114,9 @@ class Api(commands.Cog):
             "/admin/stats",
             "/admin/guild/{guild_id}/users",
             "/admin/guild/{guild_id}/leave",
+            "/admin/guild/{guild_id}/dashboard-roles",
+            "/admin/guild/{guild_id}/dashboard-roles/{role_id}",
+            "/admin/guild/{guild_id}/roles",
             "/admin/user/{user_id}",
             "/admin/audit-log",
             "/admin/reviews/{review_id}",
@@ -148,6 +151,10 @@ class Api(commands.Cog):
         app.router.add_get("/admin/audit-log", self.handle_admin_audit_log)
         app.router.add_route("PATCH", "/admin/reviews/{review_id}", self.handle_admin_edit_review)
         app.router.add_delete("/admin/reviews/{review_id}", self.handle_admin_delete_review)
+        app.router.add_get("/admin/guild/{guild_id}/roles", self.handle_admin_guild_roles)
+        app.router.add_get("/admin/guild/{guild_id}/dashboard-roles", self.handle_get_dashboard_roles)
+        app.router.add_post("/admin/guild/{guild_id}/dashboard-roles", self.handle_add_dashboard_role)
+        app.router.add_delete("/admin/guild/{guild_id}/dashboard-roles/{role_id}", self.handle_remove_dashboard_role)
 
         self.runner = web.AppRunner(app)
         await self.runner.setup()
@@ -223,13 +230,32 @@ class Api(commands.Cog):
             guilds_res = await session.get(f"{DISCORD_API}/users/@me/guilds", headers=auth_headers)
             user_guilds = await guilds_res.json()
 
+        import database
         bot_guild_ids = {g.id for g in self.bot.guilds}
         allowed_guilds = []
         for g in user_guilds:
+            gid = int(g["id"])
+            if gid not in bot_guild_ids:
+                continue
             perms = int(g.get("permissions", 0))
             has_perm = bool(perms & ADMINISTRATOR) or bool(perms & MANAGE_GUILD)
-            if has_perm and int(g["id"]) in bot_guild_ids:
-                allowed_guilds.append(int(g["id"]))
+            if not has_perm:
+                # Check if user holds a dashboard-access role in this guild
+                guild_obj = self.bot.get_guild(gid)
+                if guild_obj:
+                    member = guild_obj.get_member(user_id)
+                    if member:
+                        member_role_ids = {r.id for r in member.roles}
+                        async with database.get_db() as db:
+                            async with db.execute(
+                                "SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'dashboard'",
+                                (gid,)
+                            ) as cursor:
+                                dash_roles = {row[0] for row in await cursor.fetchall()}
+                        if member_role_ids & dash_roles:
+                            has_perm = True
+            if has_perm:
+                allowed_guilds.append(gid)
 
         admin_ids = {OWNER_ID} | {
             int(x.strip())
@@ -1008,6 +1034,78 @@ class Api(commands.Cog):
             await db.commit()
 
         await database.log_admin_action(payload["user_id"], "delete_review", target_id=review_id)
+        return web.json_response({"ok": True}, headers=_cors(request))
+
+    # ── Admin: Dashboard Roles ─────────────────────────────────────────────────
+
+    async def handle_admin_guild_roles(self, request: web.Request):
+        """Return all roles in the guild so the admin panel can show a picker."""
+        _require_admin(request)
+        guild_id = int(request.match_info["guild_id"])
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            raise web.HTTPNotFound(reason="Guild not found")
+        roles = [
+            {"role_id": str(r.id), "name": r.name, "color": str(r.color)}
+            for r in sorted(guild.roles, key=lambda r: -r.position)
+            if not r.is_default()
+        ]
+        return web.json_response(roles, headers=_cors(request))
+
+    async def handle_get_dashboard_roles(self, request: web.Request):
+        _require_admin(request)
+        guild_id = int(request.match_info["guild_id"])
+        import database
+        import aiosqlite
+        guild = self.bot.get_guild(guild_id)
+        async with database.get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT role_id FROM GuildRoles WHERE guild_id = ? AND role_type = 'dashboard'",
+                (guild_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+        roles = []
+        for r in rows:
+            rid = r["role_id"]
+            role = guild.get_role(rid) if guild else None
+            roles.append({"role_id": str(rid), "name": role.name if role else str(rid)})
+        return web.json_response(roles, headers=_cors(request))
+
+    async def handle_add_dashboard_role(self, request: web.Request):
+        payload = _require_admin(request)
+        guild_id = int(request.match_info["guild_id"])
+        try:
+            body = await request.json()
+            role_id = int(body["role_id"])
+        except Exception:
+            raise web.HTTPBadRequest(reason="Invalid JSON or missing role_id")
+        import database
+        async with database.get_db() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO GuildRoles (guild_id, role_id, role_type) VALUES (?, ?, 'dashboard')",
+                (guild_id, role_id)
+            )
+            await db.commit()
+        guild = self.bot.get_guild(guild_id)
+        role = guild.get_role(role_id) if guild else None
+        await database.log_admin_action(payload["user_id"], "dashboard_role_add", guild_id=guild_id,
+                                        target_id=role_id, details=role.name if role else None)
+        return web.json_response({"ok": True}, status=201, headers=_cors(request))
+
+    async def handle_remove_dashboard_role(self, request: web.Request):
+        payload = _require_admin(request)
+        guild_id = int(request.match_info["guild_id"])
+        role_id = int(request.match_info["role_id"])
+        import database
+        async with database.get_db() as db:
+            await db.execute(
+                "DELETE FROM GuildRoles WHERE guild_id = ? AND role_id = ? AND role_type = 'dashboard'",
+                (guild_id, role_id)
+            )
+            await db.commit()
+        await database.log_admin_action(payload["user_id"], "dashboard_role_remove", guild_id=guild_id,
+                                        target_id=role_id)
         return web.json_response({"ok": True}, headers=_cors(request))
 
     # ── Admin: Audit Log ───────────────────────────────────────────────────────
