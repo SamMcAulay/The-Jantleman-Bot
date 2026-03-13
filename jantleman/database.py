@@ -70,6 +70,51 @@ def get_db():
     return aiosqlite.connect(DB_PATH)
 
 
+async def backfill_review_guild_ids(bot):
+    """One-time migration: assign guild_id to reviews created before guild scoping."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT review_id, target_id, author_id FROM Reviews WHERE guild_id IS NULL"
+        ) as cursor:
+            reviews = await cursor.fetchall()
+
+        if not reviews:
+            return
+
+        updated = 0
+        for review in reviews:
+            rid = review["review_id"]
+            target_id = review["target_id"]
+            author_id = review["author_id"]
+
+            # Prefer guilds where the target (reviewed person) is a current member
+            target_guilds = [g.id for g in bot.guilds if g.get_member(target_id)]
+            if len(target_guilds) == 1:
+                guild_id = target_guilds[0]
+            else:
+                # Fall back to guilds where both reviewer and target are members
+                both_guilds = [
+                    g.id for g in bot.guilds
+                    if g.get_member(target_id) and g.get_member(author_id)
+                ]
+                if len(both_guilds) == 1:
+                    guild_id = both_guilds[0]
+                elif len(bot.guilds) == 1:
+                    guild_id = bot.guilds[0].id
+                else:
+                    continue  # Ambiguous — skip
+
+            await db.execute(
+                "UPDATE Reviews SET guild_id = ? WHERE review_id = ?", (guild_id, rid)
+            )
+            updated += 1
+
+        if updated:
+            await db.commit()
+            logging.info(f"[Migration] Backfilled guild_id for {updated}/{len(reviews)} reviews.")
+
+
 async def log_admin_action(admin_id: int, action: str, guild_id: int = None, target_id: int = None, details: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(

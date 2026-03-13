@@ -31,6 +31,7 @@ bot = JantlemanBot()
 @bot.event
 async def on_ready():
     logging.info(f"Logged in as {bot.user}")
+    await database.backfill_review_guild_ids(bot)
 
 @bot.event
 async def on_member_update(before, after):
