@@ -800,11 +800,15 @@ class Api(commands.Cog):
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT u.user_id, u.total_stars, u.total_reviews, u.is_blacklisted, u.post_limit_hours
+                """SELECT u.user_id, u.is_blacklisted, u.post_limit_hours,
+                          COUNT(r.review_id) AS total_reviews,
+                          ROUND(AVG(r.stars), 1) AS avg_rating
                    FROM Users u
-                   WHERE u.total_reviews > 0
-                   ORDER BY u.total_reviews DESC
-                   LIMIT 50"""
+                   INNER JOIN Reviews r ON r.target_id = u.user_id AND r.guild_id = ?
+                   GROUP BY u.user_id
+                   ORDER BY total_reviews DESC
+                   LIMIT 50""",
+                (guild_id,)
             ) as cursor:
                 rows = await cursor.fetchall()
 
@@ -813,13 +817,12 @@ class Api(commands.Cog):
         for r in rows:
             uid = r["user_id"]
             member = guild.get_member(uid) if guild else None
-            avg = round(r["total_stars"] / r["total_reviews"], 1) if r["total_reviews"] > 0 else 0
             users.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else str(uid),
                 "avatar": str(member.display_avatar.url) if member else None,
                 "total_reviews": r["total_reviews"],
-                "avg_rating": avg,
+                "avg_rating": r["avg_rating"] or 0,
                 "is_blacklisted": bool(r["is_blacklisted"]),
                 "post_limit_hours": r["post_limit_hours"],
             })
