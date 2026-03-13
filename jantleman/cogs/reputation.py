@@ -314,8 +314,8 @@ class Reputation(commands.Cog):
                 weighted_stars = int(stars * weight)
 
                 await db.execute("INSERT OR IGNORE INTO Users (user_id) VALUES (?)", (user.id,))
-                await db.execute("INSERT INTO Reviews (target_id, author_id, stars, comment, proof_url) VALUES (?, ?, ?, ?, ?)", 
-                                 (user.id, interaction.user.id, stars, comment, proof_link))
+                await db.execute("INSERT INTO Reviews (target_id, author_id, stars, comment, proof_url, guild_id) VALUES (?, ?, ?, ?, ?, ?)",
+                                 (user.id, interaction.user.id, stars, comment, proof_link, interaction.guild_id))
                 await db.execute("UPDATE Users SET total_stars = total_stars + ?, total_reviews = total_reviews + 1 WHERE user_id = ?", 
                                  (weighted_stars, user.id))
                 await db.commit()

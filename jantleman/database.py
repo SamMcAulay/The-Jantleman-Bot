@@ -40,6 +40,7 @@ async def init_db():
             "ALTER TABLE Settings ADD COLUMN global_post_limit_hours INTEGER DEFAULT NULL",
             "ALTER TABLE Settings ADD COLUMN auto_delete_new BOOLEAN DEFAULT 0",
             "ALTER TABLE Settings ADD COLUMN alert_channel_id INTEGER DEFAULT NULL",
+            "ALTER TABLE Reviews ADD COLUMN guild_id INTEGER DEFAULT NULL",
         ]:
             try:
                 await db.execute(migration)

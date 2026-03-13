@@ -588,9 +588,14 @@ class Api(commands.Cog):
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT user_id, total_stars, total_reviews, is_blacklisted, post_limit_hours
-                   FROM Users WHERE total_reviews > 0
-                   ORDER BY total_reviews DESC"""
+                """SELECT u.user_id, u.is_blacklisted, u.post_limit_hours,
+                          COUNT(r.review_id) AS guild_reviews,
+                          ROUND(AVG(r.stars), 1) AS guild_avg
+                   FROM Users u
+                   INNER JOIN Reviews r ON r.target_id = u.user_id AND r.guild_id = ?
+                   GROUP BY u.user_id
+                   ORDER BY guild_reviews DESC""",
+                (guild_id,)
             ) as cursor:
                 rows = await cursor.fetchall()
 
@@ -598,13 +603,12 @@ class Api(commands.Cog):
         for r in rows:
             uid = r["user_id"]
             member = guild.get_member(uid) if guild else None
-            avg = round(r["total_stars"] / r["total_reviews"], 1) if r["total_reviews"] > 0 else 0
             members.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else None,
                 "avatar": str(member.display_avatar.url) if member else None,
-                "total_reviews": r["total_reviews"],
-                "avg_rating": avg,
+                "total_reviews": r["guild_reviews"],
+                "avg_rating": r["guild_avg"] or 0,
                 "is_blacklisted": bool(r["is_blacklisted"]),
                 "post_limit_hours": r["post_limit_hours"],
             })
@@ -623,9 +627,9 @@ class Api(commands.Cog):
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT stars, comment, proof_url, author_id, timestamp
-                   FROM Reviews WHERE target_id = ?
+                   FROM Reviews WHERE target_id = ? AND guild_id = ?
                    ORDER BY timestamp DESC""",
-                (user_id,)
+                (user_id, guild_id)
             ) as cursor:
                 rows = await cursor.fetchall()
 
