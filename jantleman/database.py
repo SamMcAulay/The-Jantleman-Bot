@@ -33,6 +33,26 @@ async def init_db():
             channel_name TEXT DEFAULT NULL,
             PRIMARY KEY (guild_id, channel_id)
         )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS DetectedFeedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            first_message_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            guild_id INTEGER NOT NULL,
+            author_id INTEGER NOT NULL,
+            rating_message_id TEXT DEFAULT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS FeedbackRatings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feedback_message_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            guild_id INTEGER NOT NULL,
+            feedback_author_id INTEGER NOT NULL,
+            rater_id INTEGER NOT NULL,
+            rating INTEGER NOT NULL,
+            reason TEXT DEFAULT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
         # Safe migrations
         for migration in [
             "ALTER TABLE MonitoredChannels ADD COLUMN channel_name TEXT DEFAULT NULL",
@@ -41,6 +61,7 @@ async def init_db():
             "ALTER TABLE Settings ADD COLUMN auto_delete_new BOOLEAN DEFAULT 0",
             "ALTER TABLE Settings ADD COLUMN alert_channel_id INTEGER DEFAULT NULL",
             "ALTER TABLE Reviews ADD COLUMN guild_id INTEGER DEFAULT NULL",
+            "ALTER TABLE Settings ADD COLUMN feedback_detection BOOLEAN DEFAULT 0",
         ]:
             try:
                 await db.execute(migration)

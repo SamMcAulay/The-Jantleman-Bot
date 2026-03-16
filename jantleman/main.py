@@ -23,6 +23,7 @@ class JantlemanBot(commands.Bot):
         await self.load_extension("cogs.api")
         await self.load_extension("cogs.reputation")
         await self.load_extension("cogs.watchlist")
+        await self.load_extension("cogs.feedback")
         await self.tree.sync()
         logging.info("System Online. Extensions Loaded.")
 

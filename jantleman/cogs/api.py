@@ -314,6 +314,7 @@ class Api(commands.Cog):
             "global_post_limit_hours":  row["global_post_limit_hours"]     if row else None,
             "auto_delete_new":          bool(row["auto_delete_new"])       if row else False,
             "alert_channel_id":         str(row["alert_channel_id"])       if row and row["alert_channel_id"] else "",
+            "feedback_detection":       bool(row["feedback_detection"])    if row else False,
         }
         return web.json_response(data, headers=_cors(request))
 
@@ -329,6 +330,7 @@ class Api(commands.Cog):
         track_identity          = bool(body.get("track_identity", True))
         proof_req               = str(body.get("proof_req", "required"))
         auto_delete_new         = bool(body.get("auto_delete_new", False))
+        feedback_detection      = bool(body.get("feedback_detection", False))
         min_reviews             = int(body.get("min_reviews", 1))
         global_post_limit_hours = body.get("global_post_limit_hours")
         verified_role_id        = body.get("verified_role_id") or None
@@ -350,8 +352,9 @@ class Api(commands.Cog):
         async with database.get_db() as db:
             await db.execute(
                 """INSERT INTO Settings (guild_id, track_identity, proof_req, verified_role_id,
-                       audit_role_id, min_reviews, global_post_limit_hours, auto_delete_new, alert_channel_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       audit_role_id, min_reviews, global_post_limit_hours, auto_delete_new,
+                       alert_channel_id, feedback_detection)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(guild_id) DO UPDATE SET
                        track_identity          = excluded.track_identity,
                        proof_req               = excluded.proof_req,
@@ -360,11 +363,12 @@ class Api(commands.Cog):
                        min_reviews             = excluded.min_reviews,
                        global_post_limit_hours = excluded.global_post_limit_hours,
                        auto_delete_new         = excluded.auto_delete_new,
-                       alert_channel_id        = excluded.alert_channel_id""",
+                       alert_channel_id        = excluded.alert_channel_id,
+                       feedback_detection      = excluded.feedback_detection""",
                 (guild_id, track_identity, proof_req,
                  to_int_or_none(verified_role_id), to_int_or_none(audit_role_id),
                  min_reviews, to_int_or_none(global_post_limit_hours),
-                 auto_delete_new, to_int_or_none(alert_channel_id)),
+                 auto_delete_new, to_int_or_none(alert_channel_id), feedback_detection),
             )
             await db.commit()
 
