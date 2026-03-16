@@ -415,9 +415,10 @@ class FeedbackDetector(commands.Cog):
             return
         if not isinstance(message.channel, discord.Thread):
             return
-        if not isinstance(message.channel.parent, discord.ForumChannel):
-            return
         if not message.content.strip():
+            return
+        # message.guild is always set for guild threads
+        if not message.guild:
             return
 
         guild_id = message.guild.id
@@ -425,6 +426,9 @@ class FeedbackDetector(commands.Cog):
         parent_id = message.channel.parent_id
         user_id = message.author.id
 
+        # Use MonitoredChannels as the gate — don't rely on Thread.parent being
+        # cached (it returns None when the ForumChannel isn't in the cache,
+        # which silently dropped all messages in previous versions).
         async with database.get_db() as db:
             db.row_factory = aiosqlite.Row
 
