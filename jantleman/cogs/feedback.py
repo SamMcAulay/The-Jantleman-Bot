@@ -417,7 +417,6 @@ class FeedbackDetector(commands.Cog):
             return
         if not message.content.strip():
             return
-        # message.guild is always set for guild threads
         if not message.guild:
             return
 
@@ -426,27 +425,34 @@ class FeedbackDetector(commands.Cog):
         parent_id = message.channel.parent_id
         user_id = message.author.id
 
-        # Use MonitoredChannels as the gate — don't rely on Thread.parent being
-        # cached (it returns None when the ForumChannel isn't in the cache,
-        # which silently dropped all messages in previous versions).
-        async with database.get_db() as db:
-            db.row_factory = aiosqlite.Row
+        logging.info(f"[FeedbackDetector] Message in thread {channel_id} (parent {parent_id}) from {message.author} in guild {guild_id}")
 
-            async with db.execute(
-                "SELECT 1 FROM MonitoredChannels WHERE guild_id = ? AND channel_id = ?",
-                (guild_id, parent_id),
-            ) as cursor:
-                if not await cursor.fetchone():
-                    return
+        try:
+            async with database.get_db() as db:
+                db.row_factory = aiosqlite.Row
 
-            async with db.execute(
-                "SELECT feedback_detection FROM Settings WHERE guild_id = ?",
-                (guild_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT 1 FROM MonitoredChannels WHERE guild_id = ? AND channel_id = ?",
+                    (guild_id, parent_id),
+                ) as cursor:
+                    if not await cursor.fetchone():
+                        logging.info(f"[FeedbackDetector] parent {parent_id} not in MonitoredChannels — skipping")
+                        return
+
+                async with db.execute(
+                    "SELECT feedback_detection FROM Settings WHERE guild_id = ?",
+                    (guild_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+        except Exception as exc:
+            logging.error(f"[FeedbackDetector] DB error in on_message: {exc}")
+            return
 
         if not row or not row["feedback_detection"]:
+            logging.info(f"[FeedbackDetector] feedback_detection off for guild {guild_id} — skipping")
             return
+
+        logging.info(f"[FeedbackDetector] Buffering message from {message.author} in thread {channel_id}")
 
         cooldown_key = (guild_id, channel_id, user_id)
         if cooldown_key in self._cooldowns:
@@ -484,6 +490,7 @@ class FeedbackDetector(commands.Cog):
         )
 
         is_feedback, confidence = _classify(combined)
+        logging.info(f"[FeedbackDetector] Classified {len(combined)}ch from {author}: is_feedback={is_feedback}, confidence={confidence:.2f}")
 
         if not is_feedback or confidence < 0.60:
             return
