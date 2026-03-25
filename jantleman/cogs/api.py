@@ -316,8 +316,6 @@ class Api(commands.Cog):
             "alert_channel_id":         str(row["alert_channel_id"])       if row and row["alert_channel_id"] else "",
             "feedback_detection":       bool(row["feedback_detection"])    if row else False,
         }
-        import logging
-        logging.info(f"[Settings GET] guild={guild_id} feedback_detection={data['feedback_detection']} raw={row['feedback_detection'] if row else 'no row'}")
         return web.json_response(data, headers=_cors(request))
 
     async def handle_post_settings(self, request: web.Request):
@@ -333,8 +331,6 @@ class Api(commands.Cog):
         proof_req               = str(body.get("proof_req", "required"))
         auto_delete_new         = bool(body.get("auto_delete_new", False))
         feedback_detection      = bool(body.get("feedback_detection", False))
-        import logging
-        logging.info(f"[Settings POST] guild={guild_id} feedback_detection raw={body.get('feedback_detection')} parsed={feedback_detection}")
         min_reviews             = int(body.get("min_reviews", 1))
         global_post_limit_hours = body.get("global_post_limit_hours")
         verified_role_id        = body.get("verified_role_id") or None

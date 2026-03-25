@@ -425,7 +425,7 @@ class FeedbackDetector(commands.Cog):
         parent_id = message.channel.parent_id
         user_id = message.author.id
 
-        logging.info(f"[FeedbackDetector] Message in thread {channel_id} (parent {parent_id}) from {message.author} in guild {guild_id}")
+        logging.debug(f"[FeedbackDetector] Message in thread {channel_id} (parent {parent_id}) from {message.author} in guild {guild_id}")
 
         try:
             async with database.get_db() as db:
@@ -436,7 +436,7 @@ class FeedbackDetector(commands.Cog):
                     (guild_id, parent_id),
                 ) as cursor:
                     if not await cursor.fetchone():
-                        logging.info(f"[FeedbackDetector] parent {parent_id} not in MonitoredChannels — skipping")
+                        logging.debug(f"[FeedbackDetector] parent {parent_id} not in MonitoredChannels — skipping")
                         return
 
                 async with db.execute(
@@ -449,7 +449,7 @@ class FeedbackDetector(commands.Cog):
             return
 
         if not row or not row["feedback_detection"]:
-            logging.info(f"[FeedbackDetector] feedback_detection off for guild {guild_id} — skipping")
+            logging.debug(f"[FeedbackDetector] feedback_detection off for guild {guild_id} — skipping")
             return
 
         logging.info(f"[FeedbackDetector] Buffering message from {message.author} in thread {channel_id}")
