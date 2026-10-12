@@ -244,7 +244,7 @@ class Api(commands.Cog):
                 # Check if user holds a dashboard-access role in this guild
                 guild_obj = self.bot.get_guild(gid)
                 if guild_obj:
-                    member = await members.resolve_member(guild_obj, user_id)
+                    member = await members.resolve_member(guild_obj, user_id, fresh=True)
                     if member:
                         member_role_ids = {r.id for r in member.roles}
                         async with database.get_db() as db:
