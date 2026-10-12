@@ -3,6 +3,7 @@ import time
 import jwt
 from aiohttp import web, ClientSession
 from discord.ext import commands
+import members
 
 DISCORD_API = "https://discord.com/api/v10"
 MANAGE_GUILD = 0x20
@@ -243,7 +244,7 @@ class Api(commands.Cog):
                 # Check if user holds a dashboard-access role in this guild
                 guild_obj = self.bot.get_guild(gid)
                 if guild_obj:
-                    member = guild_obj.get_member(user_id)
+                    member = await members.resolve_member(guild_obj, user_id)
                     if member:
                         member_role_ids = {r.id for r in member.roles}
                         async with database.get_db() as db:
@@ -461,9 +462,10 @@ class Api(commands.Cog):
 
         result = []
         guild = self.bot.get_guild(guild_id)
+        resolved = await members.resolve_members(guild, [r["user_id"] for r in rows])
         for r in rows:
             uid = r["user_id"]
-            member = guild.get_member(uid) if guild else None
+            member = resolved.get(uid)
             result.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else str(uid),
@@ -534,9 +536,10 @@ class Api(commands.Cog):
 
         result = []
         guild = self.bot.get_guild(guild_id)
+        resolved = await members.resolve_members(guild, [r["user_id"] for r in rows])
         for r in rows:
             uid = r["user_id"]
-            member = guild.get_member(uid) if guild else None
+            member = resolved.get(uid)
             result.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else str(uid),
@@ -639,11 +642,12 @@ class Api(commands.Cog):
             ) as cursor:
                 rows = await cursor.fetchall()
 
-        members = []
+        resolved = await members.resolve_members(guild, [r["user_id"] for r in rows])
+        member_list = []
         for r in rows:
             uid = r["user_id"]
-            member = guild.get_member(uid) if guild else None
-            members.append({
+            member = resolved.get(uid)
+            member_list.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else None,
                 "avatar": str(member.display_avatar.url) if member else None,
@@ -653,7 +657,7 @@ class Api(commands.Cog):
                 "post_limit_hours": r["post_limit_hours"],
             })
 
-        return web.json_response(members, headers=_cors(request))
+        return web.json_response(member_list, headers=_cors(request))
 
     async def handle_get_user_reviews(self, request: web.Request):
         guild_id = int(request.match_info["guild_id"])
@@ -676,10 +680,11 @@ class Api(commands.Cog):
         raw_proof_urls = [r["proof_url"] for r in rows]
         url_map = await self._refresh_discord_urls(raw_proof_urls)
 
+        resolved = await members.resolve_members(guild, [r["author_id"] for r in rows])
         reviews = []
         for r in rows:
             aid = r["author_id"]
-            author = guild.get_member(aid) if guild else None
+            author = resolved.get(aid)
             raw_url = r["proof_url"]
             proof_url = url_map.get(raw_url, raw_url) if raw_url and raw_url.startswith("https://cdn.discordapp.com/") else raw_url
             # Normalise old "No Proof Provided" sentinel to null
@@ -712,10 +717,11 @@ class Api(commands.Cog):
                 rows = await cursor.fetchall()
 
         guild = self.bot.get_guild(guild_id)
+        resolved = await members.resolve_members(guild, [r["user_id"] for r in rows])
         result = []
         for r in rows:
             uid = r["user_id"]
-            member = guild.get_member(uid) if guild else None
+            member = resolved.get(uid)
             result.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else str(uid),
@@ -850,10 +856,11 @@ class Api(commands.Cog):
                 rows = await cursor.fetchall()
 
         guild = self.bot.get_guild(guild_id)
+        resolved = await members.resolve_members(guild, [r["user_id"] for r in rows])
         users = []
         for r in rows:
             uid = r["user_id"]
-            member = guild.get_member(uid) if guild else None
+            member = resolved.get(uid)
             users.append({
                 "user_id": str(uid),
                 "username": member.display_name if member else str(uid),

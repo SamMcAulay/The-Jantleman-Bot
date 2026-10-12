@@ -5,6 +5,7 @@ import logging
 import asyncio
 from dotenv import load_dotenv
 import database
+import members
 import aiosqlite
 from datetime import datetime, timedelta
 
@@ -13,9 +14,11 @@ load_dotenv()
 
 class JantlemanBot(commands.Bot):
     def __init__(self):
+        # Privileged intents are opt-in via env so the bot can still run while
+        # Discord hasn't (re)approved them. Set to "1" once access is granted.
         intents = discord.Intents.default()
-        intents.members = True
-        intents.message_content = True
+        intents.members = os.getenv("ENABLE_MEMBERS_INTENT") == "1"
+        intents.message_content = os.getenv("ENABLE_MESSAGE_CONTENT_INTENT") == "1"
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -32,6 +35,10 @@ bot = JantlemanBot()
 @bot.event
 async def on_ready():
     logging.info(f"Logged in as {bot.user}")
+    if not bot.intents.members:
+        logging.warning("Members intent disabled: using REST member lookups; name changes only tracked when users post.")
+    if not bot.intents.message_content:
+        logging.warning("Message content intent disabled: feedback detection and starter-message watchlist scans are inactive.")
     await database.backfill_review_guild_ids(bot)
 
 @bot.event
@@ -43,6 +50,26 @@ async def on_member_update(before, after):
                 (after.id, before.display_name, after.display_name),
             )
             await db.commit()
+
+async def record_name_if_changed(member):
+    """Fallback name tracking for when on_member_update can't fire (no members intent).
+
+    Compares the member's current display name to the last one we saw. The first
+    sighting stores a baseline row with old_name NULL, which isn't counted as a change.
+    """
+    async with database.get_db() as db:
+        async with db.execute(
+            "SELECT new_name FROM NameHistory WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (member.id,),
+        ) as cursor:
+            last = await cursor.fetchone()
+        if last and last[0] == member.display_name:
+            return
+        await db.execute(
+            "INSERT INTO NameHistory (user_id, old_name, new_name) VALUES (?, ?, ?)",
+            (member.id, last[0] if last else None, member.display_name),
+        )
+        await db.commit()
 
 @bot.event
 async def on_thread_create(thread):
@@ -78,6 +105,12 @@ async def on_thread_create(thread):
     if not owner:
         logging.error(f"❌ Could not determine owner for thread {thread.id}. Skipping.")
         return
+
+    if not bot.intents.members and isinstance(owner, discord.Member):
+        try:
+            await record_name_if_changed(owner)
+        except Exception as e:
+            logging.error(f"Name tracking fallback failed for {owner.id}: {e}")
 
     async with database.get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -159,7 +192,7 @@ async def on_thread_create(thread):
         if s_track_identity:
             seven_days_ago = datetime.now() - timedelta(days=7)
             async with db.execute(
-                "SELECT COUNT(*) FROM NameHistory WHERE user_id = ? AND timestamp > ?",
+                "SELECT COUNT(*) FROM NameHistory WHERE user_id = ? AND timestamp > ? AND old_name IS NOT NULL",
                 (owner.id, seven_days_ago),
             ) as cursor:
                 name_changes = await cursor.fetchone()
@@ -261,7 +294,7 @@ async def on_thread_create(thread):
             for (uid,) in users_to_alert:
                 if uid == owner.id:
                     continue
-                user_obj = thread.guild.get_member(uid)
+                user_obj = await members.resolve_member(thread.guild, uid)
                 if user_obj:
                     try:
                         dm_embed = discord.Embed(

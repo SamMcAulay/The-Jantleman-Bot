@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import database
+import members
 import aiosqlite
 import asyncio
 from datetime import datetime, timedelta
@@ -359,14 +360,16 @@ class Reputation(commands.Cog):
         embed.add_field(name="🌟 Reputation", value=f"**{avg}/5.0**\n{self.get_stars_display(avg)}", inline=True)
         embed.add_field(name="🤝 Interactions", value=f"**{data['total_reviews']}**\nRecorded", inline=True)
 
+        await interaction.response.defer()
+        resolved = await members.resolve_members(interaction.guild, [r["author_id"] for r in recent])
         feed = ""
         for r in recent:
-            auth = interaction.guild.get_member(r["author_id"])
+            auth = resolved.get(r["author_id"])
             name = auth.display_name if auth else "Unknown"
             feed += f'**{r["stars"]}⭐** *"{r["comment"]}"* — {name}\n'
 
         embed.add_field(name="💬 Recent Feedback", value=feed or "No comments available.", inline=False)
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # --- AUDIT LOG ---
     @app_commands.command(name="audit", description="🛡️ View proof logs (Staff Only)")
@@ -386,8 +389,10 @@ class Reputation(commands.Cog):
             return await interaction.response.send_message(f"No records for {user.display_name}.", ephemeral=True)
 
         embed = self.create_embed(title=f"📜 Audit Log: {user.display_name}", description="Recent 10 Reviews", color=discord.Color.red(), user=user)
+        await interaction.response.defer(ephemeral=True)
+        resolved = await members.resolve_members(interaction.guild, [r["author_id"] for r in reviews])
         for r in reviews:
-            auth = interaction.guild.get_member(r["author_id"])
+            auth = resolved.get(r["author_id"])
             name = auth.mention if auth else f"ID: {r['author_id']}"
             proof_display = f"[🔗 **Inspect Proof**]({r['proof_url']})" if r["proof_url"].startswith("http") else r["proof_url"]
 
@@ -396,7 +401,7 @@ class Reputation(commands.Cog):
                 value=f"**From:** {name}\n**Note:** {r['comment']}\n{proof_display}",
                 inline=False,
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # --- LEADERBOARD ---
     @app_commands.command(name="leaderboard", description="🏆 View the most reputable members")
@@ -412,8 +417,9 @@ class Reputation(commands.Cog):
             return await interaction.followup.send("The ledger is empty.")
 
         embed = self.create_embed(title="🏆 Hall of Fame", description="Top 10 Most Reviewed Members", color=discord.Color.gold())
+        resolved = await members.resolve_members(interaction.guild, [row["user_id"] for row in top_traders])
         for i, row in enumerate(top_traders, 1):
-            user = interaction.guild.get_member(row["user_id"])
+            user = resolved.get(row["user_id"])
             name = user.display_name if user else "Unknown User"
             avg = round(row["total_stars"] / row["total_reviews"], 1)
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"#{i}"
